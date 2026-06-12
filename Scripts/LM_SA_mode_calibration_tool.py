@@ -9,19 +9,26 @@ Workflow
   1. Load MRC + mdoc            Assembles the SerialEM TEM montage and fits the
                                 montage-pixel -> stage (um) mapping from the
                                 tile StagePositions (similarity / affine fit,
-                                same approach as the picker).
+                                same approach as the picker).  The montage is
+                                shown with a fixed display-only flip (see
+                                MONTAGE_FLIP_X / MONTAGE_FLIP_Y) so its
+                                orientation matches the acquired image; this
+                                NEVER affects the stage coordinates.
   2. Pick 4 points (left pane)  Left-click four features on the TEM montage.
                                 Each becomes a stage position (S1).
-  3. Choose imaging state       Dropdown: LMMM, MMM, 33kx_tomo, 81kx_tomo,
-                                64kx_tomo, HMMM.
+  3. Choose imaging state       Dropdown: MMM, HMMM, 33kx_tomo, 81kx_tomo,
+                                64kx_tomo.
   4. Acquire                    Sets the imaging state, moves the stage to the
                                 CENTRE of the four S1 points, records one image,
                                 and shows it in the right pane.
   5. Pick 4 points (right pane) Left-click the same four features on the
                                 acquired image. Each becomes a stage position
                                 (S2) in the acquired image's frame.
-  6. Compute transform          A similarity transform mapping S1 -> S2 is fit
-                                and appended as one line to the output window.
+  6. Compute transform          TWO transforms mapping S1 -> S2 are fit and
+                                appended (one line each): a SIMILARITY transform
+                                (rotation + uniform scale + translation, no
+                                shear) and an AFFINE transform (which adds shear
+                                + anisotropic scale).
   7. Export output              Save all output lines to a .txt file.
 
 Mouse controls (both panes)
@@ -87,9 +94,18 @@ MAX_DISP_PX = 4000          # downsample display to at most this on the long axi
 N_POINTS    = 4             # points required per pane
 _SHIFT_MASK = 0x0001        # Tk event.state bit for Shift
 
-IMAGING_STATES = ["LMMM", "MMM", "33kx_tomo", "81kx_tomo", "64kx_tomo", "HMMM"]
+IMAGING_STATES = ["MMM", "HMMM", "33kx_tomo", "81kx_tomo", "64kx_tomo"]
 
 PT_COLORS = [CYA, YEL, ACC2, MAG]   # per-point colours (1..4)
+
+# DISPLAY-ONLY flip applied automatically to the left (TEM montage) pane so its
+# orientation matches the acquired image.  These mirror only what is drawn and
+# where markers are placed - the stage coordinates of clicked points are
+# computed from the true (un-flipped) pixel and are NOT affected.  Flip Y is on
+# by default (montage vs single image usually differ by a vertical/+Y flip);
+# set either to the value that makes the two panes line up.
+MONTAGE_FLIP_X = False
+MONTAGE_FLIP_Y = True
 
 
 def _shift_held(mpl_event):
@@ -472,51 +488,83 @@ def get_microscope():
 
 
 # ---------------------------------------------------------------------------
-# Similarity transform between two point sets
+# Transforms between two point sets  (similarity and affine)
 # ---------------------------------------------------------------------------
-def similarity_S1_to_S2(S1, S2):
-    """Fit a similarity transform mapping S1 -> S2.  Returns a dict with the
-    3x3 matrix, scale, rotation (deg), translation and RMSE (in S2 units)."""
-    S1 = np.asarray(S1, float); S2 = np.asarray(S2, float)
-    if _HAVE_SKIMAGE:
-        t = estimate_transform("similarity", S1, S2)
-        M = np.asarray(t.params, float)
-        scale = float(t.scale); rot = float(np.degrees(t.rotation))
-        tx, ty = float(t.translation[0]), float(t.translation[1])
-        pred = t(S1)
-    else:
-        M, scale, rot, tx, ty = _similarity_lstsq(S1, S2)
-        pred = (M @ np.column_stack([S1, np.ones(len(S1))]).T).T[:, :2]
-    rmse = float(np.sqrt(np.mean(np.sum((pred - S2) ** 2, axis=1))))
-    return {"matrix": M, "scale": scale, "rotation_deg": rot,
-            "tx": tx, "ty": ty, "rmse": rmse}
+def _decompose(M):
+    """Decompose the 2x2 part of a 3x3 transform into scale_x, scale_y,
+    rotation (deg) and shear (deg), matching skimage's convention.  For a pure
+    similarity the shear comes out ~0."""
+    a0, a1 = M[0, 0], M[0, 1]
+    b0, b1 = M[1, 0], M[1, 1]
+    sx = math.hypot(a0, b0)
+    sy = math.hypot(a1, b1)
+    rot = math.atan2(b0, a0)
+    shear = math.atan2(-a1, b1) - rot
+    return sx, sy, math.degrees(rot), math.degrees(shear)
 
 
-def _similarity_lstsq(S1, S2):
-    """Fallback similarity fit (no skimage): solve sx=a*x-b*y+tx, sy=b*x+a*y+ty."""
+def _fit_lstsq(S1, S2, model):
+    """Fit transform matrix (3x3) without skimage.
+    model='similarity' -> 4 params (no shear); model='affine' -> 6 params."""
     n = len(S1)
     x, y = S1[:, 0], S1[:, 1]
+    if model == "affine":
+        A = np.zeros((2 * n, 6)); b = np.zeros(2 * n)
+        A[0::2] = np.column_stack([x, y, np.ones(n),
+                                   np.zeros(n), np.zeros(n), np.zeros(n)])
+        A[1::2] = np.column_stack([np.zeros(n), np.zeros(n), np.zeros(n),
+                                   x, y, np.ones(n)])
+        b[0::2] = S2[:, 0]; b[1::2] = S2[:, 1]
+        sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+        a0, a1, tx, b0, b1, ty = map(float, sol)
+        return np.array([[a0, a1, tx], [b0, b1, ty], [0, 0, 1]], float)
+    # similarity
     A = np.zeros((2 * n, 4)); b = np.zeros(2 * n)
     A[0::2] = np.column_stack([x, -y, np.ones(n), np.zeros(n)])
     A[1::2] = np.column_stack([y,  x, np.zeros(n), np.ones(n)])
     b[0::2] = S2[:, 0]; b[1::2] = S2[:, 1]
     sol, *_ = np.linalg.lstsq(A, b, rcond=None)
     a, bb, tx, ty = map(float, sol)
-    M = np.array([[a, -bb, tx], [bb, a, ty], [0, 0, 1]], float)
-    return M, math.hypot(a, bb), math.degrees(math.atan2(bb, a)), tx, ty
+    return np.array([[a, -bb, tx], [bb, a, ty], [0, 0, 1]], float)
+
+
+def fit_transform(S1, S2, model):
+    """Fit 'similarity' (no shear) or 'affine' (incl. shear + anisotropic scale)
+    mapping S1 -> S2.  Returns a uniform dict: model, scale_x, scale_y,
+    rotation_deg, shear_deg, tx, ty, rmse, matrix (3x3)."""
+    S1 = np.asarray(S1, float); S2 = np.asarray(S2, float)
+    if _HAVE_SKIMAGE:
+        t = estimate_transform(model, S1, S2)
+        M = np.asarray(t.params, float)
+        pred = t(S1)
+    else:
+        M = _fit_lstsq(S1, S2, model)
+        pred = (M @ np.column_stack([S1, np.ones(len(S1))]).T).T[:, :2]
+    sx, sy, rot, shear = _decompose(M)
+    rmse = float(np.sqrt(np.mean(np.sum((pred - S2) ** 2, axis=1))))
+    return {"model": model, "scale_x": sx, "scale_y": sy,
+            "rotation_deg": rot, "shear_deg": shear,
+            "tx": float(M[0, 2]), "ty": float(M[1, 2]),
+            "rmse": rmse, "matrix": M}
 
 
 # ---------------------------------------------------------------------------
 # Pick pane  -  an image + up to N_POINTS clickable points
 # ---------------------------------------------------------------------------
 class PickPane(ttk.LabelFrame):
-    def __init__(self, parent, title, on_change, **kw):
+    def __init__(self, parent, title, on_change, flip_x=False, flip_y=False, **kw):
         super().__init__(parent, text=title, padding=4, **kw)
         self._on_change = on_change
         self._ds = 1
         self._pixel_to_stage = None
         self._picks = []                 # list of dicts
         self._artists = []
+        # Display-only mirrors (fixed for this pane).  Stage coordinates are
+        # always computed from the true, un-mirrored pixel - see _on_click.
+        self._flip_x = bool(flip_x)
+        self._flip_y = bool(flip_y)
+        self._w_disp = 0
+        self._h_disp = 0
         self.rowconfigure(0, weight=1); self.columnconfigure(0, weight=1)
 
         fig = Figure(figsize=(5, 5), facecolor=BG)
@@ -550,9 +598,12 @@ class PickPane(ttk.LabelFrame):
         self._ds = ds
         self._pixel_to_stage = pixel_to_stage
         self._picks = []
+        self._w_disp = disp_img.shape[1]
+        self._h_disp = disp_img.shape[0]
         self._ax.cla(); self._ax.set_facecolor(BG); self._ax.axis("off")
-        self._im = self._ax.imshow(disp_img, cmap="gray", origin="upper",
-                                   aspect="equal", interpolation="nearest")
+        self._im = self._ax.imshow(self._oriented(disp_img), cmap="gray",
+                                   origin="upper", aspect="equal",
+                                   interpolation="nearest")
         self._canvas.draw_idle()
         self._update_labels()
 
@@ -570,6 +621,20 @@ class PickPane(ttk.LabelFrame):
     def is_ready(self):
         return self._im is not None and self._pixel_to_stage is not None
 
+    # -- display-only flip helpers --
+    def _oriented(self, arr):
+        if self._flip_x:
+            arr = np.fliplr(arr)
+        if self._flip_y:
+            arr = np.flipud(arr)
+        return arr
+
+    def _mirror_x(self, x):
+        return (self._w_disp - 1 - x) if self._flip_x else x
+
+    def _mirror_y(self, y):
+        return (self._h_disp - 1 - y) if self._flip_y else y
+
     # -- internal --
     def _remove_last(self):
         if self._picks:
@@ -585,10 +650,15 @@ class PickPane(ttk.LabelFrame):
             return
         if not self.is_ready() or len(self._picks) >= N_POINTS:
             return
-        px = event.xdata * self._ds
-        py = event.ydata * self._ds
+        # Mirror the click back to the TRUE (un-flipped) display-array coords,
+        # so the stage coordinate is computed from the real montage pixel
+        # regardless of the cosmetic flip.
+        txd = self._mirror_x(event.xdata)
+        tyd = self._mirror_y(event.ydata)
+        px = txd * self._ds
+        py = tyd * self._ds
         sx, sy = self._pixel_to_stage(px, py)
-        self._picks.append({"dx": event.xdata, "dy": event.ydata,
+        self._picks.append({"txd": txd, "tyd": tyd,
                             "px": px, "py": py, "sx": sx, "sy": sy})
         self._redraw_points(); self._update_labels()
 
@@ -599,9 +669,9 @@ class PickPane(ttk.LabelFrame):
         self._artists = []
         for i, p in enumerate(self._picks):
             col = PT_COLORS[i % len(PT_COLORS)]
-            x, y = p["dx"], p["dy"]; arm = 12
-            l1, = self._ax.plot([x - arm, x + arm], [y, y], color=col, lw=1.2, zorder=5)
-            l2, = self._ax.plot([x, x], [y - arm, y + arm], color=col, lw=1.2, zorder=5)
+            x, y = self._mirror_x(p["txd"]), self._mirror_y(p["tyd"]); arm = 12
+            l1, = self._ax.plot([x - arm, x + arm], [y, y], color=col, lw=3.0, zorder=5)
+            l2, = self._ax.plot([x, x], [y - arm, y + arm], color=col, lw=3.0, zorder=5)
             dot, = self._ax.plot(x, y, "o", color=col, markersize=6,
                                  markeredgecolor="white", markeredgewidth=0.8, zorder=6)
             txt = self._ax.text(x + 8, y - 8, str(i + 1), color=col,
@@ -680,7 +750,7 @@ class CalibApp(tk.Tk):
 
         ctl = ttk.Frame(self, padding=(8, 4)); ctl.pack(fill="x")
         ttk.Label(ctl, text="Imaging state:", style="Sm.TLabel").pack(side="left")
-        self._state_var = tk.StringVar(value=IMAGING_STATES[0])
+        self._state_var = tk.StringVar(value=IMAGING_STATES[1])
         ttk.Combobox(ctl, textvariable=self._state_var, width=12, state="readonly",
                      values=IMAGING_STATES).pack(side="left", padx=(4, 12))
         self._btn_acq = ttk.Button(ctl, text="Acquire  (move to centre + image)",
@@ -696,14 +766,16 @@ class CalibApp(tk.Tk):
         panes = ttk.Frame(self, padding=(8, 4)); panes.pack(fill="both", expand=True)
         panes.columnconfigure(0, weight=1); panes.columnconfigure(1, weight=1)
         panes.rowconfigure(0, weight=1)
+        # Left/montage pane gets the fixed display-only flip automatically.
         self._pane_tem = PickPane(panes, "1.  TEM montage  -  pick 4 points",
-                                  self._refresh_buttons)
+                                  self._refresh_buttons,
+                                  flip_x=MONTAGE_FLIP_X, flip_y=MONTAGE_FLIP_Y)
         self._pane_tem.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         self._pane_acq = PickPane(panes, "2.  Acquired image  -  pick 4 points",
                                   self._refresh_buttons)
         self._pane_acq.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
 
-        out_lf = ttk.LabelFrame(self, text="Output  (one transform per line)",
+        out_lf = ttk.LabelFrame(self, text="Output  (similarity + affine, one per line)",
                                 padding=4)
         out_lf.pack(fill="x", padx=8, pady=(0, 4))
         out_lf.columnconfigure(0, weight=1)
@@ -714,8 +786,8 @@ class CalibApp(tk.Tk):
         self._out.configure(yscrollcommand=osb.set)
         osb.grid(row=0, column=1, sticky="ns")
         self._out.insert("end",
-            "# TEM<->acquired-image similarity transforms (maps S1 TEM stage "
-            "-> S2 acquired-image stage, units um)\n")
+            "# TEM<->acquired-image transforms (maps S1 TEM stage -> S2 "
+            "acquired-image stage, units um); two models per Compute\n")
         btnrow = ttk.Frame(out_lf); btnrow.grid(row=1, column=0, columnspan=2,
                                                 sticky="ew", pady=(4, 0))
         self._btn_exp = ttk.Button(btnrow, text="Export output to TXT",
@@ -859,32 +931,42 @@ class CalibApp(tk.Tk):
                 "Pick 4 points on BOTH panes before computing."); return
         S1 = self._pane_tem.stage_points()
         S2 = self._pane_acq.stage_points()
-        try:
-            r = similarity_S1_to_S2(S1, S2)
-        except Exception as e:
-            messagebox.showerror("Transform failed", str(e)); return
 
-        M = r["matrix"]
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cx, cy = self._last_center if self._last_center else (float("nan"),) * 2
-        matrix_str = ";".join(",".join(f"{v:.8g}" for v in row) for row in M[:2])
-        line = "\t".join([
-            ts,
-            f"state={self._state_var.get()}",
-            f"centre_um=({cx:.3f},{cy:.3f})",
-            f"scale={r['scale']:.6f}",
-            f"rot_deg={r['rotation_deg']:.4f}",
-            f"tx_um={r['tx']:.4f}",
-            f"ty_um={r['ty']:.4f}",
-            f"rmse_um={r['rmse']:.4f}",
-            f"matrix=[{matrix_str}]",
-        ])
-        self._out.insert("end", line + "\n")
+        state = self._state_var.get()
+
+        results = {}
+        for model in ("similarity", "affine"):
+            try:
+                r = fit_transform(S1, S2, model)
+            except Exception as e:
+                messagebox.showerror("Transform failed", f"{model}: {e}"); return
+            M = r["matrix"]
+            matrix_str = ";".join(",".join(f"{v:.8g}" for v in row) for row in M[:2])
+            line = "\t".join([
+                ts,
+                f"model={model}",
+                f"state={state}",
+                f"centre_um=({cx:.3f},{cy:.3f})",
+                f"scale_x={r['scale_x']:.6f}",
+                f"scale_y={r['scale_y']:.6f}",
+                f"rot_deg={r['rotation_deg']:.4f}",
+                f"shear_deg={r['shear_deg']:.4f}",
+                f"tx_um={r['tx']:.4f}",
+                f"ty_um={r['ty']:.4f}",
+                f"rmse_um={r['rmse']:.4f}",
+                f"matrix=[{matrix_str}]",
+            ])
+            self._out.insert("end", line + "\n")
+            results[model] = r
+
         self._out.see("end")
-        self._n_lines += 1
+        self._n_lines += 2
+        sim = results["similarity"]; aff = results["affine"]
         self._status.set(
-            f"Transform #{self._n_lines} added:  scale {r['scale']:.4f}, "
-            f"rot {r['rotation_deg']:.3f} deg, rmse {r['rmse']:.4f} um.")
+            f"Added similarity (rmse {sim['rmse']:.4f} um) + "
+            f"affine (rmse {aff['rmse']:.4f} um, shear {aff['shear_deg']:.3f} deg).")
         self._refresh_buttons()
 
     # -- export / clear --
@@ -900,10 +982,11 @@ class CalibApp(tk.Tk):
             return
         try:
             with open(path, "w") as fh:
-                fh.write("# columns: timestamp  state  centre_um  scale  "
-                         "rot_deg  tx_um  ty_um  rmse_um  matrix(3x3 rows 1-2)\n")
+                fh.write("# columns: timestamp  model  state  centre_um  "
+                         "scale_x  scale_y  rot_deg  shear_deg  tx_um  ty_um  "
+                         "rmse_um  matrix(3x3 rows 1-2)\n")
                 fh.write(text + "\n")
-            self._status.set(f"Exported {self._n_lines} transform(s) to "
+            self._status.set(f"Exported {self._n_lines} transform line(s) to "
                              f"{os.path.basename(path)}")
             messagebox.showinfo("Exported", f"Saved to:\n{path}")
         except Exception as e:
@@ -912,8 +995,8 @@ class CalibApp(tk.Tk):
     def _clear_output(self):
         self._out.delete("1.0", "end")
         self._out.insert("end",
-            "# TEM<->acquired-image similarity transforms (maps S1 TEM stage "
-            "-> S2 acquired-image stage, units um)\n")
+            "# TEM<->acquired-image transforms (maps S1 TEM stage -> S2 "
+            "acquired-image stage, units um); two models per Compute\n")
         self._n_lines = 0
         self._refresh_buttons()
 
