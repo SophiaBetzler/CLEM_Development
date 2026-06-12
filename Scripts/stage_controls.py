@@ -10,6 +10,22 @@ def _get_current_tilt() -> float:
     tilt = float(pysem.ReportedValue())
     return tilt
 
+TRANSFORM = np.array([
+                    [-0.6617954041,  1.140037208,  1339.073717],
+                    [-1.140037208,  -0.6617954041, 2877.670999],
+                    [ 0.0,           0.0,          1.0        ],])
+
+def _apply_transform(x, y, M=TRANSFORM):
+    M = np.asarray(M, dtype=float)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x_new = M[0, 0] * x + M[0, 1] * y + M[0, 2]
+    y_new = M[1, 0] * x + M[1, 1] * y + M[1, 2]
+    if x_new.ndim == 0:            # scalar in -> scalar out
+        return float(x_new), float(y_new)
+    return x_new, y_new
+#change stage x,y position, move stage to updated position, take image at 33 kx and 9.4kx
+
 
 def absolute_stage_movement(stage_position, tilt_angle):
     current_tilt = _get_current_tilt()
