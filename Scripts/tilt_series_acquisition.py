@@ -1,20 +1,9 @@
 
+import serialem as sem
 
-
-
-def run_grouped_dose_symmetric_tilt_series(
-    track_state="TS_Track",
-    focus_state="TS_Focus",
-    record_state="TS_Record",
-    start_tilt=15,
-    start_defocus=-3.0,
-    step=3,
-    max_tilt=60,
-    group=4,
-    tilt_backlash=-1,
-    wait=3,
-):
-    import serialem as sem
+def run_grouped_dose_symmetric_tilt_series(track_state="TS_Track", focus_state="TS_Focus",
+    record_state="TS_Record", start_tilt=15, start_defocus=-3.0, step=3,
+    max_tilt=60, group=4, tilt_backlash=-1, wait=3,):
 
     state = {
                 "stage_x": None,
@@ -29,9 +18,6 @@ def run_grouped_dose_symmetric_tilt_series(
                 "isy_minus": 0,
             }
 
-    def echo(msg):
-        sem.Echo(str(msg))
-
     def first(vals):
         return vals[0] if isinstance(vals, tuple) else vals
 
@@ -40,7 +26,7 @@ def run_grouped_dose_symmetric_tilt_series(
             filling = first(sem.AreDewarsFilling())
             if int(filling) == 0:
                 return
-            echo("dewars are filling")
+            sem.Echo("dewars are filling")
             sem.Delay(60, "sec")
 
     def report_is_xy():
@@ -49,9 +35,11 @@ def run_grouped_dose_symmetric_tilt_series(
             return float(vals[0][0]), float(vals[0][1])
         return float(vals[0]), float(vals[1])
 
+
+
     def acquire_track(ref_buf=None, save_buf=None):
         check_auto_fill()
-        sem.GoToImagingState(track_state)
+        _set_imaging_state(track_state)
         sem.T()
 
         if ref_buf is not None:
@@ -62,13 +50,13 @@ def run_grouped_dose_symmetric_tilt_series(
 
     def autofocus():
         check_auto_fill()
-        sem.GoToImagingState(focus_state)
+        _set_imaging_state(focus_state)
         sem.G()
         return float(first(sem.ReportDefocus()))
 
     def acquire_record(ref_buf=None, save_buf=None):
         check_auto_fill()
-        sem.GoToImagingState(record_state)
+        _set_imaging_state(record_state)
         sem.R()
         sem.S()
 
@@ -93,11 +81,7 @@ def run_grouped_dose_symmetric_tilt_series(
         state["stage_x"] = float(stage[0])
         state["stage_y"] = float(stage[1])
 
-        set_record_prediction(
-            start_defocus,
-            state["isx_plus"],
-            state["isy_plus"],
-        )
+        set_record_prediction(start_defocus, state["isx_plus"], state["isy_plus"],)
 
         acquire_track(save_buf="K")
         sem.Copy("A", "L")
@@ -143,7 +127,6 @@ def run_grouped_dose_symmetric_tilt_series(
         sem.TiltBy(float(tilt_backlash))
         sem.TiltTo(float(state["minus_tilt"]))
         sem.MoveStageTo(state["stage_x"], state["stage_y"])
-
         set_record_prediction(
             state["focus_minus"],
             state["isx_minus"],
@@ -161,7 +144,7 @@ def run_grouped_dose_symmetric_tilt_series(
 
         acquire_track(save_buf="L")
 
-    echo("Starting grouped dose-symmetric tilt series with imaging states")
+    sem.Echo("Starting grouped dose-symmetric tilt series with imaging states")
 
     sem.SetLowDoseMode(0)
 
@@ -186,4 +169,6 @@ def run_grouped_dose_symmetric_tilt_series(
     sem.ResetImageShift()
     sem.CloseFile()
 
-    echo("Finished grouped dose-symmetric tilt series")
+    sem.Echo("Finished grouped dose-symmetric tilt series")
+
+run_grouped_dose_symmetric_tilt_series()
