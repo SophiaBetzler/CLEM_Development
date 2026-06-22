@@ -313,6 +313,7 @@ class MRCReader:
         print(f"[INFO] Using mdoc: {mdoc_path}")
 
         global_info, pieces, mont_sections = self.parse_mdoc(mdoc_path)
+        self._global_info = global_info
         self._validate_coord_key(pieces)
         print(f"[INFO] Using coordinate field: {self.coord_key}")
 
@@ -774,6 +775,24 @@ class MRCReader:
                 self.refine_tile_alignment()
             return "RefinedPieceCoordinates"
         return self.coord_key
+    
+    def _tile_stage_z(self, piece):
+        sp = piece.get("StagePosition")
+        if isinstance(sp, (list, tuple)) and len(sp) >= 3:
+            return float(sp[2])
+
+        for k in ("StageZ", "Z"):
+            v = piece.get(k)
+            if v is not None:
+                return float(v[0] if isinstance(v, (list, tuple)) else v)
+
+        gi = getattr(self, "_global_info", None)
+        if gi:
+            for k in ("StageZ", "Z"):
+                v = gi.get(k)
+                if v is not None:
+                    return float(v[0] if isinstance(v, (list, tuple)) else v)
+        return None
 
     # ------------------------------------------------------------------ #
     # Per-tile alignment shift -> estimated stage position
@@ -886,6 +905,7 @@ class MRCReader:
         print(f"[INFO] Using mdoc: {mdoc_path}")
 
         global_info, pieces, mont_sections = self.parse_mdoc(mdoc_path)
+        self._global_info = global_info
         self._validate_coord_key(pieces)
         print(f"[INFO] Using coordinate field: {self.coord_key}")
 
@@ -1123,7 +1143,7 @@ class MRCReader:
 
         sec = self.section
         pieces = self.section_pieces[sec]
-        key = self._display_key()                       
+        key = self._display_key()
 
         if any("estimated_stage_position" not in p for p in pieces):
             self.tile_alignment_shift()
@@ -1149,12 +1169,15 @@ class MRCReader:
             anchor_plain = (esp.get("ShiftedPlain") if esp else None) or sp
             anchor_rot   = (esp.get("ShiftedRot")   if esp else None) or sp
             if anchor_plain is None or anchor_rot is None:
-                continue   # no stage info for this tile
+                continue
 
             r = p.get("RotationAngle", 0.0)
             th = np.deg2rad(float(r[0]) if isinstance(r, (list, tuple)) else float(r))
 
-            tiles.append({"z": p.get("ZValue"), "cx": cx, "cy": cy,
+            stage_z = self._tile_stage_z(p)
+
+            tiles.append({"z": p.get("ZValue"), "stage_z": stage_z,
+                        "cx": cx, "cy": cy,
                         "ax_p": anchor_plain[0], "ay_p": anchor_plain[1],
                         "ax_r": anchor_rot[0],   "ay_r": anchor_rot[1],
                         "cos": np.cos(th), "sin": np.sin(th)})
@@ -1188,11 +1211,13 @@ class MRCReader:
             sy_r = t["ay_r"] + (t["sin"] * dx_um + t["cos"] * dy_um)
 
             picks.append({"px": px, "py": py, "z": t["z"],
+                        "stage_z": t["stage_z"],
                         "plain": (sx_p, sy_p), "rot": (sx_r, sy_r)})
             print(f"point {len(picks)}: tile z={t['z']}  "
                 f"pixel=({px:.0f}, {py:.0f})  "
                 f"plain=({sx_p:.3f}, {sy_p:.3f}) um  "
-                f"rot=({sx_r:.3f}, {sy_r:.3f}) um")
+                f"rot=({sx_r:.3f}, {sy_r:.3f}) um  "
+                f"stageZ={t['stage_z']}")
 
             ax.plot(px, py, "+", color="cyan", markersize=12, markeredgewidth=1.5)
             ax.text(px + 8, py - 8, str(len(picks)), color="cyan",
