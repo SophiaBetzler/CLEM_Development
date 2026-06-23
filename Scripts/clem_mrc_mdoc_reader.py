@@ -1233,7 +1233,6 @@ class MRCReader:
         plt.show()
         return picks
 
-
 if __name__ == "__main__":
     mrc = MRCReader(
         path='/Users/sophia.betzler/Desktop/12-chief-dog_montage_20260616-07-47-11.mrc',

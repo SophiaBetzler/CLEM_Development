@@ -3,9 +3,10 @@ import serialem as sem
 from datetime import datetime
 
 class NavigatorComm:
-    def __init__(self, path, picks=None):
+    def __init__(self, path, picks=None, rotation=True):
         self.path = path
         self.picks = picks
+        self.rotation = rotation
 
     def _create_nav_file(self):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
@@ -16,16 +17,16 @@ class NavigatorComm:
         nav_file = os.path.join(self.path, "nav_file" + "_" + timestamp + '.nav')
         sem.OpenNavigator(nav_file)
 
-    def load_mrc_in_nav(self, mrc_file, item_index):
-        self._create_nav_file()
+    def load_mrc_in_nav(self, mrc_file):
+        if sem.ReportIfNavOpen() == 0:
+            self._create_nav_file()
         sem.ReadOtherFile(section=0, buffer=-1, name=os.path.join(self.path, mrc_file))
         sem.NewMap()
 
-
-    def show_nav_adjustment(picks, key="rot"):
+    def show_nav_adjustment(self):
         rows = []
-        for i, p in enumerate(picks, start=1):
-            coord = p.get(key)
+        for i, p in enumerate(self.picks, start=1):
+            coord = p.get(self.rotation)
             if coord is None:
                 continue
             sx, sy = float(coord[0]), float(coord[1])
@@ -36,10 +37,10 @@ class NavigatorComm:
                         "delta": (ax - sx, ay - sy)})
 
         if not rows:
-            print(f"No picks with a '{key}' coordinate to test.")
+            print(f"No picks with a '{self.rotation}' coordinate to test.")
             return rows
 
-        print(f"\nAdjustStagePosForNav effect (coord = '{key}')")
+        print(f"\nAdjustStagePosForNav effect (coord = '{self.rotation}')")
         print(f"{'#':>3}  {'stageZ':>8}  "
             f"{'raw X':>10} {'raw Y':>10}   "
             f"{'adj X':>10} {'adj Y':>10}   "
@@ -68,3 +69,17 @@ class NavigatorComm:
             print("NOTE: stage_z is None for all picks - mdoc has no stage Z, "
                 "supply a default before AddStagePosAsNavPoint.")
         return rows
+    
+    def add_stage_pos_to_nav(self):
+        if sem.ReportIfNavOpen() == 0:
+            self._create_nav_file()
+        _, _, default_z = sem.ReportStageXYZ()
+        pt_id = sem.GetUniqueNavID()
+        for p in self.picks:
+            sx, sy = p["rot"]
+            z = p["stage_z"] if p["stage_z"] is not None else default_z
+            sem.AddStagePosAsNavPoint(sx, sy, z, pt_id)
+
+    def run_picks_visualization(self, mrc_file):
+        self.load_mrc_in_nav(mrc_file=mrc_file)
+        self.add_stage_pos_to_nav()
