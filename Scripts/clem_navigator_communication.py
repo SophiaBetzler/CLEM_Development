@@ -1,4 +1,8 @@
 import os
+import sys
+sys.path.append(r"C:\Program Files\SerialEM\PythonModules")
+print(sys.executable)
+print(sys.version)
 import serialem as sem
 from datetime import datetime
 
@@ -20,7 +24,10 @@ class NavigatorComm:
     def load_mrc_in_nav(self, mrc_file):
         if sem.ReportIfNavOpen() == 0:
             self._create_nav_file()
-        sem.ReadOtherFile(section=0, buffer=-1, name=os.path.join(self.path, mrc_file))
+        print( os.path.join(self.path, mrc_file))
+        sem.CloseFile()
+        sem.OpenOldFile(os.path.join(self.path, mrc_file))
+        sem.ReadFile(0)
         sem.NewMap()
 
     def show_nav_adjustment(self):
@@ -74,7 +81,7 @@ class NavigatorComm:
         if sem.ReportIfNavOpen() == 0:
             self._create_nav_file()
         _, _, default_z = sem.ReportStageXYZ()
-        pt_id = sem.GetUniqueNavID()
+        pt_id = int(sem.GetUniqueNavID())
         for p in self.picks:
             sx, sy = p["rot"]
             z = p["stage_z"] if p["stage_z"] is not None else default_z
