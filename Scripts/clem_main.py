@@ -17,4 +17,5 @@ if __name__ == "__main__":
     picks = CLEMPicker(montage=mrc.run_montage_loader_and_create_summary()).picker()
 
     navc = NavigatorComm(path=PATH, picks=picks, rotation="rotation")
+    navc.show_nav_adjustment()
     navc.run_picks_visualization(mrc_file=FILENAME)

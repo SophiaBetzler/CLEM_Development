@@ -347,6 +347,32 @@ class MRCReader:
         canvas[valid] /= weights[valid]
         return (self._normalize_image(canvas.astype(np.float32)), float(min_x), float(min_y))
 
+    # ------------------------------------------------------------------ #
+    # Determine stage rotation vs montage
+    # ------------------------------------------------------------------ #
+
+    def _fit_pixel_to_stage_rotation_matrix(self, pieces):
+        pts = [(p["px"], p["stage"]) for p in pieces if p.get("px") is not None and p.get("stage") is not None]
+
+        if len(pts) <3:
+            return None, {"n": len(pts), "message": "Not enough points to fit rotation."}
+        
+        P = np.array([[p[0], p[1]] for p, _ in pts], float)
+        S = np.array([[s[0], s[1]] for _, s in pts], float)
+        A = np.hstack([P, np.ones((len(P), 1), float)])
+        sol, *_ = np.linalg.lstsq(A, S, rcond=None)
+        M, t = sol[:2].T, sol[2]
+
+        residuals = np.hypot(*(P @ M.T + t - S).T)
+        info = {"n": len(pts),
+                "det": float(np.linalg.det(M)),
+                "angle_deg": float(np.degrees(np.arctan2(M[1, 0], M[0, 0]))),
+                "rms_um": float(np.sqrt(np.mean(residuals ** 2))),
+                "max_um": float(residuals.max()),}
+        
+        return M, info
+        
+
 
     # ------------------------------------------------------------------ #
     # Refinement
@@ -540,22 +566,22 @@ class MRCReader:
                         "px": self._px(p, key),
                         "stage": self._stage_xy(p),
                         })
+        M, fit = self._fit_pixel_to_stage_rotation_matrix(tiles)
+        if M is not None:
+            print(f"[fit] pixel -> stage n={fit['n']} angle={fit['angle_deg']:.2f} deg"
+                  f"det={fit['det']:+.3e} ({'flip' if fit['det'] < 0 else 'no flip'}) "
+                  f"rms={fit['rms_um']:.4f} um max={fit['max_um']:.4f} um")
+        else:
+            print(f"[fit] pixel -> stage n={fit['n']}  {fit['reason']}")
 
         return {"image": img, "min_x": min_x, "min_y": min_y,
                 "pixel_spacing_um": pix_um, "rotation_deg": float(np.rad2deg(theta)),
                 "img_hw": self._img_hw, "section": self.section,
-                "alignment": alignment, "tiles": tiles}
+                "alignment": alignment, "tiles": tiles,
+                "stage_matrix": M, "stage_fit": fit}
 
     def run_montage_loader_and_create_summary(self):
         if not self.section_pieces:
             self.load_mrc_montage() 
         self.show(contrast_percentiles=(1.0, 99.))
         return self.build_montage_summary()
-
-
-if __name__ == "__main__":
-    mrc = MRCReader(
-        path="C:\\Users\\CZII\\Desktop\\Test_Data\\12-chief-dog_montage_20260616-07-47-11.mrc",
-        coord_key="PieceCoordinates", refine_alignment=False, section=0)
-    summary = mrc.run_montage_loader_and_create_summary()
-    

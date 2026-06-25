@@ -23,6 +23,8 @@ class CLEMPicker:
 
         self.tiles = self._build_lookup()
         self.picks = []
+        M = montage.get("stage_matrix")
+        self._M = np.asarray(M, float) if M is not None else None
 
 
     # ------------------------------------------------------------------ #
@@ -49,12 +51,12 @@ class CLEMPicker:
             stage = piece.get("stage")
             if px is None or stage is None:
                 continue
-        out.append({
-                    "z": piece.get("z"), "stage_z": piece.get("stage_z"),
-                    "cx": float(px[0]) - self.min_x + self.img_w / 2.0, 
-                    "cy": float(px[1]) - self.min_y + self.img_h / 2.0,
-                    "sx": float(stage[0]), "sy": float(stage[1])
-                })
+            out.append({
+                        "z": piece.get("z"), "stage_z": piece.get("stage_z"),
+                        "cx": float(px[0]) - self.min_x + self.img_w / 2.0, 
+                        "cy": float(px[1]) - self.min_y + self.img_h / 2.0,
+                        "sx": float(stage[0]), "sy": float(stage[1])
+                    })
         
         if not out:
             raise ValueError(f"No usable pieces (each needs a pixel origin and a StagePosition.).")
@@ -102,11 +104,16 @@ class CLEMPicker:
         if tile is None:
             tile = self._piece_for(px, py)
         
-        dx_um = (px - tile["cx"]) * self.pix_um
-        dy_um = (py - tile["cy"]) * self.pix_um
+        dx, dy = px - tile["cx"], py - tile["cy"]
 
-        stage_x = tile["sx"] + (self.cos * dx_um - self.sin * dy_um)
-        stage_y = tile["sy"] + (self.sin * dx_um + self.cos * dy_um)
+        if self._M is not None:
+            stage_x = tile['sx'] + self._M[0, 0] * dx + self._M[0, 1] * dy
+            stage_y = tile['sy'] + self._M[1, 0] * dx + self._M[1, 1] * dy
+        else:
+            dx_um, dy_um = dx * self.pix_um, dy * self.pix_um
+            stage_x = tile["sx"] + (self.cos * dx_um - self.sin * dy_um)
+            stage_y = tile["sy"] + (self.sin * dx_um + self.cos * dy_um)
+        
 
         return stage_x, stage_y, tile 
     
