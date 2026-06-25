@@ -83,7 +83,7 @@ class NavigatorComm:
         _, _, default_z = sem.ReportStageXYZ()
         pt_id = int(sem.GetUniqueNavID())
         for p in self.picks:
-            sx, sy = p["rot"]
+            sx, sy = p["stage"]
             z = p["stage_z"] if p["stage_z"] is not None else default_z
             sem.AddStagePosAsNavPoint(sx, sy, z, pt_id)
 
