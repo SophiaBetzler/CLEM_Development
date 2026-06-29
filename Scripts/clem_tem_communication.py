@@ -5,11 +5,11 @@ print(sys.executable)
 print(sys.version)
 import serialem as sem
 from datetime import datetime
+import numpy as np
 
-class NavigatorComm:
-    def __init__(self, path, picks=None, rotation=True):
+class TEMComm:
+    def __init__(self, path, rotation=True):
         self.path = path
-        self.picks = picks
         self.rotation = rotation
 
     def _create_nav_file(self):
@@ -21,13 +21,12 @@ class NavigatorComm:
         nav_file = os.path.join(self.path, "nav_file" + "_" + timestamp + '.nav')
         sem.OpenNavigator(nav_file)
 
-    def load_mrc_in_nav(self, mrc_file):
+    def load_mrc_in_nav(self, mrc_file, buf="0"):
         if sem.ReportIfNavOpen() == 0:
             self._create_nav_file()
         print( os.path.join(self.path, mrc_file))
         sem.CloseFile()
-        sem.OpenOldFile(os.path.join(self.path, mrc_file))
-        sem.ReadFile(0)
+        sem.ReadOtherFile(0, buf, os.path.join(self.path, mrc_file))
         sem.NewMap()
 
     def show_nav_adjustment(self):
@@ -77,12 +76,12 @@ class NavigatorComm:
                 "supply a default before AddStagePosAsNavPoint.")
         return rows
     
-    def add_stage_pos_to_nav(self):
+    def add_stage_pos_to_nav(self, picks):
         if sem.ReportIfNavOpen() == 0:
             self._create_nav_file()
         _, _, default_z = sem.ReportStageXYZ()
         pt_id = int(sem.GetUniqueNavID())
-        for p in self.picks:
+        for p in picks:
             sx, sy = p["stage"]
             z = p["stage_z"] if p["stage_z"] is not None else default_z
             sem.AddStagePosAsNavPoint(sx, sy, z, pt_id)
@@ -90,3 +89,40 @@ class NavigatorComm:
     def run_picks_visualization(self, mrc_file):
         self.load_mrc_in_nav(mrc_file=mrc_file)
         self.add_stage_pos_to_nav()
+
+    def precise_stage_move(self, stage_position):
+        backlashX = 2.0
+        backlashY = 2.0
+        if len(stage_position) == 3:
+            sem.MoveStageTo(stage_position[0], stage_position[1], stage_position[2], backlashX, backlashY)
+        else:
+            sem.MoveStageTo(stage_position[0], stage_position[1], backlashX, backlashY)
+        sem.Delay(2, 'sec')
+
+    def acquire_image(self, mode):
+
+        if mode in ["View", "Search", "Record", "Preview"]:
+            sem.GoToLowDoseArea(mode)
+        else:
+            raise ValueError("Selected acquisition mode not available.")
+
+        if mode == 'View':
+            sem.V()
+        elif mode == 'Record':
+            sem.R()
+        elif mode == 'Preview':
+            sem.Preview()
+        elif mode == 'Search':
+            sem.S()
+        else:
+            raise ValueError("Selected acquisition mode no available.")
+        
+    def get_calibration_matrices(self, key):
+        read_out_dict = {"ss2s": np.array(sem.SpecimenToStageMatrix(0)).reshape((2, 2))}
+        return read_out_dict
+
+    def convert_stage_img_pos(self, buf, direction, coords):
+        if direction == 'to_stage':
+            sem.BufImagePosToStagePos(buf, 1, coords[0], coords[1])[:2]
+        elif direction == 'to_img':
+            sem.StagePosToBufImagePos(buf, 1, coords[0], coords[1])

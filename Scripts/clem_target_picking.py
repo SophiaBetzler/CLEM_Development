@@ -1,6 +1,8 @@
 import numpy as np
+import matplotlib.pyplot as plt
+import mrcfile
 import os
-
+### Some of the functionality is derived from spaceTomo to help transfer the coordinates to paceTomo
 
 class CLEMPicker:
 
@@ -8,7 +10,7 @@ class CLEMPicker:
     MONTAGE_FLIP_X = False
     MONTAGE_FLIP_Y = True
 
-    def __init__(self, montage):
+    def __init__(self, montage, navigator):
         self.montage  = montage
 
         self.pix_um          = montage["pixel_spacing_um"]
@@ -16,6 +18,8 @@ class CLEMPicker:
         self.img_h, self.img_w = montage["img_hw"]
         self.min_x, self.min_y = montage["min_x"], montage["min_y"]
         self.image           = montage["image"]
+        self.path            = montage["path"]
+        self.tem             = navigator
         self.H, self.W       = self.image.shape[:2]
 
         theta = np.deg2rad(montage["rotation_deg"])
@@ -46,7 +50,6 @@ class CLEMPicker:
 
         out = []
         for piece in self.montage["tiles"]:
-            print(self.montage["tiles"])
             px = piece.get("px")
             stage = piece.get("stage")
             if px is None or stage is None:
@@ -95,12 +98,23 @@ class CLEMPicker:
 
         return np.clip((img - lo) / (hi - lo), 0.0, 1.0)
     
+    def _save_as_mrc_reference(self, crop, file_path):
+
+        data = np.ascontiguousarray(crop, dtype=np.float32)
+        pix_size_nm = self.pix_um * 1000.0                       # microns/px -> nm/px
+
+        with mrcfile.new(str(file_path), overwrite=True) as mrc:
+            mrc.set_data(data)
+            mrc.voxel_size = (pix_size_nm * 10, pix_size_nm * 10, pix_size_nm * 10)  # Angstrom
+            mrc.update_header_from_data()
+        return file_path
+    
 
     # ------------------------------------------------------------------ #
     # Pixel to stage conversion
     # ------------------------------------------------------------------ #
 
-    def pixel_to_stage_conversion(self, px, py, tile=None):
+    def _pixel_to_stage_conversion(self, px, py, tile=None):
         if tile is None:
             tile = self._piece_for(px, py)
         
@@ -118,11 +132,98 @@ class CLEMPicker:
         return stage_x, stage_y, tile 
     
     # ------------------------------------------------------------------ #
+    # Correlation of target accross magnification
+    # ------------------------------------------------------------------ #
+
+    def _get_crop_image_target_from_lmm(self, picks, fov):
+
+        fov_px = tuple(f / self.pix_um for f in fov)      # (x, y) in pixels
+        fov_x, fov_y = fov_px
+
+        px, py = picks['px'], picks['py']
+
+        x0_des, x1_des = int(px - fov_x / 2), int(px + fov_x / 2)   # cols = x
+        y0_des, y1_des = int(py - fov_y / 2), int(py + fov_y / 2)   # rows = y
+
+        print(f"Map dimensions: {self.image.shape}\nCrop coords:\nx: {x0_des}, {x1_des}\ny: {y0_des}, {y1_des}")
+
+        y0, y1 = max(0, y0_des), min(self.image.shape[0], y1_des)
+        x0, x1 = max(0, x0_des), min(self.image.shape[1], x1_des)
+
+        imageCrop = self.image[y0:y1, x0:x1].astype(np.float32, copy=True)
+
+        saturated = imageCrop >= 1.0
+        valid = imageCrop[~saturated]
+        mean = float(valid.mean()) if valid.size else 0.0
+        imageCrop[saturated] = mean
+
+        pad_top    = max(0, -y0_des)
+        pad_bottom = max(0, y1_des - self.image.shape[0])
+        pad_left   = max(0, -x0_des)
+        pad_right  = max(0, x1_des - self.image.shape[1])
+
+        if pad_top or pad_bottom or pad_left or pad_right:
+            imageCrop = np.pad(
+                imageCrop,
+                ((pad_top, pad_bottom), (pad_left, pad_right)),   mode="constant", constant_values=mean,)
+            print("WARNING: Target position is close to the edge of the map and was padded.")
+        imageCrop_flip = self._flip(imageCrop)
+
+        plt.imshow(imageCrop_flip)
+        plt.show()
+
+        return imageCrop
+    
+    def _align_target_at_higher_mag(self, img_crop_path, target_stage_pos):
+        buffer = 'B'
+        self.tem.load_mrc_in_nav(img_crop_path, buf=buffer)
+        self.tem.precise_stage_move(target_stage_pos)
+        self.tem.acquire_image(mode="View")
+
+        max_iter = 5
+        threshold = 0.5
+        it = 0
+        stage_shift = np.array([np.inf, np.inf])
+
+        large_mismatch = True
+
+        while np.linalg.norm(stage_shift) > threshold and it < max_iter:
+            self.tem.acquire_image(mode='View')
+            imgX, imgY, _, live_img_px = float(sem.ImageProperties()[4])
+            if imgX*live_img_px > self.img_h:
+                raise ValueError("Magnficiation mismatch the reference image must have a wider field of view than the higher mag image it should be correlated to.")
+            else:
+                if large_mismatch is True:
+
+                    ##### HERE I NEED TO ADD THE ALIGNTO LOGIC, I WANT TO MAKE SURE THAT THE STAGE SHIFT IS ONLY USED FOR LARGE MISMATCHES
+                    ##### INSIGHTS IN CLAUD CONVERSATION
+                    ##### THEN FINAL STEP IS TO REPLACE THE TARGET LOGIC OF PACETOMO WITH THE GENERATED COORDINATES
+                    
+                    self.tem.alignTo(buffer)
+            _, ss_shift = .alignTo(ref_buffer, avoid_image_shift=True)
+            stage_shift = scope.getMatrices()["ss2s"] @ ss_shift
+            if np.linalg.norm(stage_shift) <= threshold:
+                live.clearAlignment(); return live
+            scope.moveStage(-stage_shift, relative=True)
+            it += 1
+        return Buffer(buffer="A")
+    
+    # ------------------------------------------------------------------ #
     # Picker
     # ------------------------------------------------------------------ #
     
+    def run_auto_picker(self, picks):
+        self.nav.add_stage_pos_to_nav(picks)
+
+        for i, pick in enumerate(picks):
+            img_crop = self.get_crop_image_target_from_lmm(pick, (10, 5))
+            img_crop_path = os.path.join(self.path, '_', str(i), '.mrc')
+            self._save_as_mrc_reference(img_crop, img_crop_path)
+            self._find_target_at_higher_mag(img_crop_path, (pick['stage'][0], pick['stage'][1], pick['stage_z']))
+
+
     def picker(self):
-        import matplotlib.pyplot as plt
+
         max_px = 2000
         ds   = max(1, max(self.H, self.W) // max_px)
         disp = self.image[::ds, ::ds] if ds > 1 else self.image
