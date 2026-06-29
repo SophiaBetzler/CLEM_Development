@@ -117,6 +117,10 @@ class TEMComm:
         else:
             raise ValueError("Selected acquisition mode no available.")
         
+        imgX, imgY, _, live_img_px = float(sem.ImageProperties())
+        return (imgX, imgY, live_img_px)
+        
+        
     def get_calibration_matrices(self, key):
         read_out_dict = {"ss2s": np.array(sem.SpecimenToStageMatrix(0)).reshape((2, 2))}
         return read_out_dict
@@ -126,3 +130,40 @@ class TEMComm:
             sem.BufImagePosToStagePos(buf, 1, coords[0], coords[1])[:2]
         elif direction == 'to_img':
             sem.StagePosToBufImagePos(buf, 1, coords[0], coords[1])
+
+    def run_serialem_alignment_routine(self, buffer, mag_compensation=True, debug_display=False):
+
+        if debug_display is True:
+            debug = int(1)
+        else:
+            debug = int(0)
+
+        if mag_compensation is True:
+            self.sem.AlignBetweenMags(buffer, -1, -1, -1, 0, 1, int(0)) # buffer, center X in the reference, center Y in the reference, max allowed shift (negative means field of view, positive microns), scale (default: 4%), rotation (default: 3 degrees), avoid_image_shift
+            self.rollBuffers()
+            self.buf = "A"
+        # Find an elegant way to manage this function
+        
+        
+        max_iter = 5
+        iteration = 0
+        
+        while np.linalg.norm(ss_shift) > 0.5 and iteration < max_iter:
+            self.sem.AlignTo(buffer, int(0), int(0), int(0), debug) #don't apply imageshift, #trimming, #correlation peak handling
+            shift = sem.ReportAlignShift()
+            ss_shift = np.array(shift[4:6]) / 1000
+            ss2s = np.array(sem.SpecimenToStageMatrix(0)).reshape((2, 2))
+            stage_shift = ss2s @ ss_shift     
+            #sem.MoveStage(-stage_shift[0], -stage_shift[1])
+            sem.TestRelaxingStage(-stage_shift[0], -stage_shift[1], 0.5) # last number is the backlash correction
+            iteration =+1
+            if debug_display is True:
+                sem.AddBufToStackWindow("A", 0, 0, 0, 0, "CC")
+                sem.Copy("B", "A")
+
+        if iteration == 5:
+            raise RuntimeError("Align routine didn't converge within 5 iterations.")
+        
+        
+        self.sem.AlignTo(buffer, int(0), int(0), int(1), debug) #use image shift to compensate
+

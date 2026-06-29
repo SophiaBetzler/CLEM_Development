@@ -174,27 +174,36 @@ class CLEMPicker:
 
         return imageCrop
     
-    def _align_target_at_higher_mag(self, img_crop_path, target_stage_pos):
+    def _align_target_at_higher_mag(self, img_crop_path, target_stage_pos, mode):
         buffer = 'B'
         self.tem.load_mrc_in_nav(img_crop_path, buf=buffer)
         self.tem.precise_stage_move(target_stage_pos)
-        self.tem.acquire_image(mode="View")
+        self.tem.acquire_image(mode=mode)
 
+        self.tem.run_serialem_align_routine(buffer=buffer)
+        
         max_iter = 5
         threshold = 0.5
         it = 0
         stage_shift = np.array([np.inf, np.inf])
 
-        large_mismatch = True
-
         while np.linalg.norm(stage_shift) > threshold and it < max_iter:
-            self.tem.acquire_image(mode='View')
-            imgX, imgY, _, live_img_px = float(sem.ImageProperties()[4])
-            if imgX*live_img_px > self.img_h:
+            (live_img_X, live_img_Y, live_img_px) = self.tem.acquire_image(mode='View')
+            
+            if self.imgX*live_img_px > self.img_h:
                 raise ValueError("Magnficiation mismatch the reference image must have a wider field of view than the higher mag image it should be correlated to.")
             else:
+                if abs(live_img_px - self.pix_um) < 0.01:
+                    print("[INFO] Reference and acquired image have a similar pixel size, no magnification adjustment performed.")
+                    self.tem.run_serialem_alignment_routine(mag_compensation=False)
+                    
+                    
+
+                    
+                    
                 if large_mismatch is True:
 
+                    #HERE ONLY STAGE MOVE    
                     ##### HERE I NEED TO ADD THE ALIGNTO LOGIC, I WANT TO MAKE SURE THAT THE STAGE SHIFT IS ONLY USED FOR LARGE MISMATCHES
                     ##### INSIGHTS IN CLAUD CONVERSATION
                     ##### THEN FINAL STEP IS TO REPLACE THE TARGET LOGIC OF PACETOMO WITH THE GENERATED COORDINATES
@@ -220,6 +229,8 @@ class CLEMPicker:
             img_crop_path = os.path.join(self.path, '_', str(i), '.mrc')
             self._save_as_mrc_reference(img_crop, img_crop_path)
             self._find_target_at_higher_mag(img_crop_path, (pick['stage'][0], pick['stage'][1], pick['stage_z']))
+
+        # How can we understand the merge with paceTomo? That would be the last step
 
 
     def picker(self):
