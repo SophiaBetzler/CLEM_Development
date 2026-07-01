@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import mrcfile
 import os
+import serialem as sem
 ### Some of the functionality is derived from spaceTomo to help transfer the coordinates to paceTomo
 
 class CLEMPicker:
