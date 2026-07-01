@@ -10,17 +10,19 @@ class CLEMPicker:
     MONTAGE_FLIP_X = False
     MONTAGE_FLIP_Y = True
 
-    def __init__(self, montage, navigator):
+    def __init__(self, montage, tem_communication):
+        
         self.montage  = montage
 
-        self.pix_um          = montage["pixel_spacing_um"]
-        self.coord_field      = montage.get("coord_field", "?")
-        self.img_h, self.img_w = montage["img_hw"]
-        self.min_x, self.min_y = montage["min_x"], montage["min_y"]
-        self.image           = montage["image"]
-        self.path            = montage["path"]
-        self.tem             = navigator
-        self.H, self.W       = self.image.shape[:2]
+        self.pix_um                 = montage["pixel_spacing_um"]
+        self.coord_field            = montage.get("coord_field", "?")
+        self.img_h, self.img_w      = montage["img_hw"]
+        self.min_x, self.min_y      = montage["min_x"], montage["min_y"]
+        self.image                  = montage["image"]
+        self.position                   = montage["position"]
+        self.path                   = montage["path"]
+        self.tem                    = tem_communication
+        self.H, self.W              = self.image.shape[:2]
 
         theta = np.deg2rad(montage["rotation_deg"])
         self.cos, self.sin = np.cos(theta), np.sin(theta)
@@ -135,12 +137,12 @@ class CLEMPicker:
     # Correlation of target accross magnification
     # ------------------------------------------------------------------ #
 
-    def _get_crop_image_target_from_lmm(self, picks, fov):
+    def _get_cropped_image_target_from_lmm(self, pick, fov):
 
         fov_px = tuple(f / self.pix_um for f in fov)      # (x, y) in pixels
         fov_x, fov_y = fov_px
 
-        px, py = picks['px'], picks['py']
+        px, py = pick['px'], pick['py']
 
         x0_des, x1_des = int(px - fov_x / 2), int(px + fov_x / 2)   # cols = x
         y0_des, y1_des = int(py - fov_y / 2), int(py + fov_y / 2)   # rows = y
@@ -150,12 +152,12 @@ class CLEMPicker:
         y0, y1 = max(0, y0_des), min(self.image.shape[0], y1_des)
         x0, x1 = max(0, x0_des), min(self.image.shape[1], x1_des)
 
-        imageCrop = self.image[y0:y1, x0:x1].astype(np.float32, copy=True)
+        image_crop = self.image[y0:y1, x0:x1].astype(np.float32, copy=True)
 
-        saturated = imageCrop >= 1.0
-        valid = imageCrop[~saturated]
+        saturated = image_crop >= 1.0
+        valid = image_crop[~saturated]
         mean = float(valid.mean()) if valid.size else 0.0
-        imageCrop[saturated] = mean
+        image_crop[saturated] = mean
 
         pad_top    = max(0, -y0_des)
         pad_bottom = max(0, y1_des - self.image.shape[0])
@@ -163,75 +165,237 @@ class CLEMPicker:
         pad_right  = max(0, x1_des - self.image.shape[1])
 
         if pad_top or pad_bottom or pad_left or pad_right:
-            imageCrop = np.pad(
-                imageCrop,
-                ((pad_top, pad_bottom), (pad_left, pad_right)),   mode="constant", constant_values=mean,)
+            image_crop = np.pad(image_crop,((pad_top, pad_bottom), (pad_left, pad_right)),   mode="constant", constant_values=mean,)
             print("WARNING: Target position is close to the edge of the map and was padded.")
-        imageCrop_flip = self._flip(imageCrop)
+        image_crop_flip = self._flip(image_crop)
+        img_crop_path = os.path.join(self.path + '_' + 'pick_reference' + '_' + str(pick['pick_id']) +   '.mrc')
+        self._save_as_mrc_reference(image_crop_flip, img_crop_path)
 
-        plt.imshow(imageCrop_flip)
+        plt.imshow(image_crop_flip)
         plt.show()
 
-        return imageCrop
+        return image_crop, image_crop_flip
     
-    def _align_target_at_higher_mag(self, img_crop_path, target_stage_pos, mode):
-        buffer = 'B'
-        self.tem.load_mrc_in_nav(img_crop_path, buf=buffer)
-        self.tem.precise_stage_move(target_stage_pos)
-        self.tem.acquire_image(mode=mode)
+    def _get_cropped_image_target_from_preset(self, fov, pick_presets):
 
-        self.tem.run_serialem_align_routine(buffer=buffer)
+        with mrcfile.open(os.path.join(self.path + f"_pick_{pick_presets['pick_id']}_{pick_presets['mode']}"), permissive=True) as mrc:
+            image = np.asarray(mrc.data, dtype=np.float32)
+            pix_um = mrc.voxel_size.x / 10000.0
+
+        fov_px = tuple(f / pix_um for f in fov)      # (x, y) in pixels
+        fov_x, fov_y = fov_px
+
+        x0_des, x1_des = int(fov_x / 2), int(fov_x / 2)   # cols = x
+        y0_des, y1_des = int(fov_y / 2), int(fov_y / 2)   # rows = y
+
+        print(f"Map dimensions: {image.shape}\nCrop coords:\nx: {x0_des}, {x1_des}\ny: {y0_des}, {y1_des}")
+
+        y0, y1 = max(0, y0_des), min(image.shape[0], y1_des)
+        x0, x1 = max(0, x0_des), min(image.shape[1], x1_des)
+
+        image_crop = image[y0:y1, x0:x1].astype(np.float32, copy=True)
+
+        saturated = image_crop >= 1.0
+        valid = image_crop[~saturated]
+        mean = float(valid.mean()) if valid.size else 0.0
+        image_crop[saturated] = mean
+
+        pad_top    = max(0, -y0_des)
+        pad_bottom = max(0, y1_des - image.shape[0])
+        pad_left   = max(0, -x0_des)
+        pad_right  = max(0, x1_des - image.shape[1])
+
+        if pad_top or pad_bottom or pad_left or pad_right:
+            image_crop = np.pad(image_crop,((pad_top, pad_bottom), (pad_left, pad_right)),   mode="constant", constant_values=mean,)
+            print("WARNING: Target position is close to the edge of the map and was padded.")
+        image_crop_flip = self._flip(image_crop)
+        img_crop_path = os.path.join(self.path + '_' + 'pick_reference' + '_' + str(pick_presets['pick_id']) + '_2' +   '.mrc')
+        self._save_as_mrc_reference(image_crop_flip, img_crop_path)
+
+        plt.imshow(image_crop_flip)
+        plt.show()
+
+        return image_crop, image_crop_flip
+    
+    def _align_target_at_higher_mag(self, pick_id, target_stage_pos, mode):
+
+        buffer = 'P' # this doesn't get rolled over so the reference stays here
+        pick_path = os.path.join(self.path + '_' + 'pick_reference' + '_' + str(pick_id) + '.mrc')
+        self.tem._load_mrc_in_nav(pick_path, buffer=buffer)
+        self.tem.precise_stage_move(stage_position=target_stage_pos)
+
+        (live_img_X, live_img_Y, live_img_px) = self.tem.acquire_image(mode=mode)
         
-        max_iter = 5
-        threshold = 0.5
-        it = 0
-        stage_shift = np.array([np.inf, np.inf])
+        if live_img_X*live_img_px > self.img_h:
+            raise ValueError("Magnficiation mismatch the reference image must have a wider field of view than the higher mag image it should be correlated to.")
+        
+        print('[INFO] Running serialEM alignment routine.')
+        self.tem.run_serialem_alignment_routine(buffer=buffer, pick_id=pick_id, mode=mode)
+        self.tem.acquire_image(mode=mode)
+        self.tem.image_from_buffer()
 
-        while np.linalg.norm(stage_shift) > threshold and it < max_iter:
-            (live_img_X, live_img_Y, live_img_px) = self.tem.acquire_image(mode='View')
-            
-            if self.imgX*live_img_px > self.img_h:
-                raise ValueError("Magnficiation mismatch the reference image must have a wider field of view than the higher mag image it should be correlated to.")
-            else:
-                if abs(live_img_px - self.pix_um) < 0.01:
-                    print("[INFO] Reference and acquired image have a similar pixel size, no magnification adjustment performed.")
-                    self.tem.run_serialem_alignment_routine(mag_compensation=False)
-                    
-                    
-
-                    
-                    
-                if large_mismatch is True:
-
-                    #HERE ONLY STAGE MOVE    
-                    ##### HERE I NEED TO ADD THE ALIGNTO LOGIC, I WANT TO MAKE SURE THAT THE STAGE SHIFT IS ONLY USED FOR LARGE MISMATCHES
-                    ##### INSIGHTS IN CLAUD CONVERSATION
-                    ##### THEN FINAL STEP IS TO REPLACE THE TARGET LOGIC OF PACETOMO WITH THE GENERATED COORDINATES
-                    
-                    self.tem.alignTo(buffer)
-            _, ss_shift = .alignTo(ref_buffer, avoid_image_shift=True)
-            stage_shift = scope.getMatrices()["ss2s"] @ ss_shift
-            if np.linalg.norm(stage_shift) <= threshold:
-                live.clearAlignment(); return live
-            scope.moveStage(-stage_shift, relative=True)
-            it += 1
-        return Buffer(buffer="A")
+    # ------------------------------------------------------------------ #
+    # Group Picks and Define Target
+    # ------------------------------------------------------------------ #
+    def group_picks(self, radius_um=5.0, lone_offset_um=2.5):
     
+        if not self.pick_fine_aligned:
+            return []
+
+        stage_position = np.array([(pick["stage"], pick["stage_z"]) for pick in self.pick_fine_aligned], float)     
+        n = len(self.pick_fine_aligned)
+        assigned = [False] * n
+
+        order = sorted(range(n),
+                    key=lambda i: -int(np.sum(np.linalg.norm(stage_position - stage_position[i], axis=1) <= radius_um)))
+
+        groups = []
+        for seed in order:
+            if assigned[seed]:
+                continue
+            members = [i for i in range(n)
+                    if not assigned[i] and np.linalg.norm(stage_position[i] - stage_position[seed]) <= radius_um]
+            # refine: drop members outside radius of the moving centroid
+            for _ in range(10):
+                centre = pos[members].mean(axis=0)
+                kept = [i for i in members if np.linalg.norm(pos[i] - centre) <= radius_um]
+                if len(kept) == len(members):
+                    break
+                members = kept if kept else [seed]
+            for i in members:
+                assigned[i] = True
+
+            grp = [self.picks[i] for i in members]
+
+            if len(grp) > 1:
+                cpx = float(np.mean([p["px"] for p in grp]))
+                cpy = float(np.mean([p["py"] for p in grp]))
+        else:
+            off_px = lone_offset_um / self.pix_um            # um -> montage pixels
+            min_sep_px = min_target_sep_um / self.pix_um     # required clearance, pixels
+            lone = grp[0]
+
+            # direction toward the centroid of all OTHER picks (pixel space)
+            others = [p for p in self.picks if p is not lone]
+            if others:
+                ocx = np.mean([p["px"] for p in others])
+                ocy = np.mean([p["py"] for p in others])
+                vec = np.array([ocx - lone["px"], ocy - lone["py"]], float)
+                norm = np.linalg.norm(vec)
+                direction = vec / norm if norm > 1e-6 else np.array([1.0, 0.0])
+            else:
+                direction = np.array([1.0, 0.0])
+
+            all_px = np.array([[p["px"], p["py"]] for p in self.picks], float)
+
+            def _clear(cx, cy):
+                """True if (cx, cy) is at least min_sep_px from every pick."""
+                return np.all(np.linalg.norm(all_px - np.array([cx, cy]), axis=1) >= min_sep_px)
+
+            # try the requested offset; if it overlaps a pick, push further out,
+            # then rotate the direction, until a clear spot is found
+            cpx, cpy = lone["px"] + direction[0] * off_px, lone["py"] + direction[1] * off_px
+            if not _clear(cpx, cpy):
+                found = False
+                for scale in (1.5, 2.0, 2.5, 3.0):           # push outward first
+                    cx = lone["px"] + direction[0] * off_px * scale
+                    cy = lone["py"] + direction[1] * off_px * scale
+                    if _clear(cx, cy):
+                        cpx, cpy, found = cx, cy, True
+                        break
+                if not found:                                 # then sweep the angle
+                    for deg in range(30, 360, 30):
+                        a = np.deg2rad(deg)
+                        rot = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]]) @ direction
+                        cx = lone["px"] + rot[0] * off_px
+                        cy = lone["py"] + rot[1] * off_px
+                        if _clear(cx, cy):
+                            cpx, cpy, found = cx, cy, True
+                            break
+                if not found:
+                    print(f"WARNING: could not place tracking target clear of all picks "
+                          f"for pick {lone.get('pick_id')}; using best-effort position.")
+
+            sx, sy, tile = self._pixel_to_stage_conversion(cpx, cpy)
+            groups.append({"tracking": {"px": cpx, "py": cpy, "stage": (sx, sy), "stage_z": tile["stage_z"]}, "picks": grp,})
+        return groups
+
+    def write_pacetomo_group(self, group, user_name):
+
+        #### ADD REFERENCE IMAGE LOGIC AND FIX EUCENTIC LOGIC
+        #### GO THROUGH WHOLE SCRIPT AGAIN TO MAKE SURE THAT IT MAKES SENSE
+
+        # --- origin = tracking centre's specimen shift (captured after centring it) ---
+        SS0 = np.array(group["tracking"]["specimen_shift"])      # absolute, microns
+
+        ordered = [group["tracking"]] + group["picks"]           # target 0 first
+
+        tgts_path = os.path.join(self.path, user_name + "_tgts.txt")
+        blocks = []
+        for i, t in enumerate(ordered):
+            nnn = str(i + 1).zfill(3)
+            SS = np.array(t["specimen_shift"]) - SS0             # relative to tracking
+            sx, sy = t["stage"]
+            tgtfile = os.path.basename(t["tgtfile"])             # reference saved per target
+            blocks.append(
+                f"_tgt = {nnn}\n"
+                f"tgtfile = {tgtfile}\n"
+                f"tsfile = {user_name}_ts_{nnn}.mrc\n"
+                f"SSX = {SS[0]}\n"
+                f"SSY = {SS[1]}\n"
+                f"stageX = {sx}\n"
+                f"stageY = {sy}\n"
+                f"skip = False\n\n"
+            )
+        with open(tgts_path, "w") as f:
+            f.write("".join(blocks))
+
+        # --- Navigator anchor: tracking reference -> map item, Acquire, note = tgts file ---
+        self.tem._load_mrc_in_nav(group["tracking"]["tgtfile"], buffer="A")
+        map_index = int(sem.NewMap(0, user_name + "_tgts.txt"))
+        sem.SetItemAcquire(map_index)
+        sem.ChangeItemLabel(map_index, "001")
+        return tgts_path
+
     # ------------------------------------------------------------------ #
     # Picker
     # ------------------------------------------------------------------ #
     
-    def run_auto_picker(self, picks):
-        self.nav.add_stage_pos_to_nav(picks)
+    def run_auto_picker(self):
+        self.picker()
+        os.makedirs(os.path.join(self.path, self.position), exist_ok=True)
+        self.tem.add_stage_pos_to_nav(picks=self.picks)
+        groups = self.group_picks(radius_um=5.0)
 
-        for i, pick in enumerate(picks):
-            img_crop = self.get_crop_image_target_from_lmm(pick, (10, 5))
-            img_crop_path = os.path.join(self.path, '_', str(i), '.mrc')
-            self._save_as_mrc_reference(img_crop, img_crop_path)
-            self._find_target_at_higher_mag(img_crop_path, (pick['stage'][0], pick['stage'][1], pick['stage_z']))
+        for g_i, group in enumerate(groups):
+            user_name = f"{self.position}_area{g_i+1}"
+            center = group["tracking"]
+            center["pick_id"] = f"{user_name}_track"
+            self._get_cropped_image_target_from_lmm(center, (10, 10)) 
+            center_summary = self._align_target_at_higher_mag(pick_id=center["pick_id"], target_stage_pos=(center["stage"][0], center["stage"][1], center["stage_z"]), mode="View", eucentric=True)
+            img_crop, img_crop_flipped = self._get_cropped_image_target_from_preset(center, (2, 2))
+            center_summary_high_mag = self._align_target_at_higher_mag(pick_id=f"{center['pick_id']}_2", target_stage_pos=(center['stage'][0], pick['stage'][1], pick['stage_z']), presets=center_summary, mode='Record', eucentric=False)
+            center.update(center_summary_high_mag)
+            self.tem.acquire_image(mode='View', )
 
-        # How can we understand the merge with paceTomo? That would be the last step
+        for pick in group['picks']:
+            img_crop, img_crop_flipped = self._get_cropped_image_target_from_lmm(pick, (10, 10))
+            pick_summary = self._align_target_at_higher_mag(pick_id=pick['pick_id'], target_stage_pos=(pick['stage'][0], pick['stage'][1], pick['stage_z']), mode='View', eucentric=True)
+            img_crop, img_crop_flipped = self._get_cropped_image_target_from_preset(pick, (2, 2))
+            pick_summary_high_mag = self._align_target_at_higher_mag(pick_id=f"{pick['pick_id']}_2", target_stage_pos=(pick['stage'][0], pick['stage'][1], pick['stage_z']), presets=pick_summary, mode='Record', eucentric=False)
+            pick.update(pick_summary_high_mag)
 
+            ref_dir = os.path.join(self.path, "targets")
+            os.makedirs(ref_dir, exist_ok=True)
+
+            self.tem.acquire(mode='View', lowdose=True, save=True, position=None, token=pick['pick_id'])
+            self.tem.acquire(mode='Record', lowdose=True, save=True, position=None, token=pick['pick_id'])
+
+         
+
+
+        self.write_pacetomo_group()
+        
 
     def picker(self):
 
@@ -252,9 +416,9 @@ class CLEMPicker:
             cpx, cpy = event.xdata, event.ydata
             px = self._unflip_x(cpx)    
             py = self._unflip_y(cpy)
-           
-            stage_x, stage_y, tile = self.pixel_to_stage_conversion(px, py)
-            self.picks.append({"px": px, "py": py, "z": tile["z"], "stage_z": tile["stage_z"], "stage": (stage_x, stage_y)})
+            pick_id = len(self.picks) + 1
+            stage_x, stage_y, tile = self._pixel_to_stage_conversion(px, py)
+            self.picks.append({"pick_id": pick_id, "px": px, "py": py, "z": tile["z"], "stage_z": tile["stage_z"], "stage": (stage_x, stage_y)})
             print(f"point {len(self.picks)}: tile z={tile['z']}  stage=({stage_x:.3f}, {stage_y:.3f}) um  stageZ={tile['stage_z']}")
 
             ax.plot(cpx, cpy, "+", color="cyan", markersize=12, markeredgewidth=1.5)

@@ -3,6 +3,7 @@ import re
 import os
 import mrcfile
 import numpy as np
+from pathlib import Path
 
 
 class MRCReader:
@@ -14,8 +15,7 @@ class MRCReader:
     MONTAGE_FLIP_X = False
     MONTAGE_FLIP_Y = True
 
-    def __init__(self, path, coord_key, refine_alignment=True, section=0):
-        self.path = path
+    def __init__(self, coord_key, refine_alignment=True, section=0):
         self.coord_key = coord_key
         self.section = section
         self.refine_alignment = refine_alignment
@@ -143,11 +143,11 @@ class MRCReader:
     # File / coordinate-field discovery
     # ------------------------------------------------------------------ #
 
-    def _find_mdoc_path(self):
-        directory = os.path.dirname(self.path)
-        stem, ext = os.path.splitext(self.path)
+    def _find_mdoc_path(self, mrc_filepath):
+        directory = os.path.dirname(mrc_filepath)
+        stem, ext = os.path.splitext(mrc_filepath)
         candidates = [
-                        self.path + ".mdoc",                      # foo.mrc.mdoc
+                        mrc_filepath + ".mdoc",                      # foo.mrc.mdoc
                         stem + ".mdoc",                           # foo.mdoc
                         stem + ext.replace(".", "_") + ".mdoc",   # foo_mrc.mdoc
                     ]
@@ -191,11 +191,11 @@ class MRCReader:
         self.section_pieces = section_map
         return section_map
 
-    def _display_key(self, ensure=True):
+    def _display_key(self, mrc_filepath, ensure=True):
         if self.refine_alignment:
             if ensure and all(p.get("RefinedPieceCoordinates") is None
                               for p in self.section_pieces[self.section]):
-                self.refine_tile_alignment()
+                self.refine_tile_alignment(mrc_filepath=mrc_filepath)
             return "RefinedPieceCoordinates"
         return self.coord_key
     
@@ -204,8 +204,8 @@ class MRCReader:
     # Loaders
     # ------------------------------------------------------------------ #
 
-    def load_mrc_single(self):
-        with mrcfile.open(self.path, mode="r", permissive=True) as mrc:
+    def load_mrc_single(self, mrc_filepath):
+        with mrcfile.open(mrc_filepath, mode="r", permissive=True) as mrc:
             data = mrc.data.copy()
             voxel = mrc.voxel_size
             info = f"shape={data.shape}  voxel={voxel}"
@@ -218,11 +218,11 @@ class MRCReader:
         self.mrc_image = self._normalize_image(data)
         return self.mrc_image, info
 
-    def load_mrc_montage(self):
-        mdoc_path = self._find_mdoc_path()
+    def load_mrc_montage(self, mrc_filepath):
+        mdoc_path = self._find_mdoc_path(mrc_filepath=mrc_filepath)
         if mdoc_path is None:
             raise FileNotFoundError(
-                f"No .mdoc found next to {os.path.basename(self.path)}.")
+                f"No .mdoc found next to {os.path.basename(mrc_filepath)}.")
         print(f"[INFO] Using mdoc: {mdoc_path}")
 
         global_info, pieces, mont_sections = self.parse_mdoc(mdoc_path)
@@ -248,28 +248,25 @@ class MRCReader:
             ps_x, ps_y = int(ps[0]), int(ps[1])
         feather_px = max(1, min(img_w - ps_x, img_h - ps_y))
 
-        # Geometry / state needed by assembly + downstream methods.
         self._img_hw = (img_h, img_w)
         self._feather_px = feather_px
         self._build_section_pieces(pieces)
 
-        # Build every section's montage from the loaded coordinate field.
         self.montages = {}
         saved_section = self.section
         for sec in sorted(self.section_pieces):
             self.section = sec
             print(f"[INFO] Assembling section {sec}: "
                   f"{len(self.section_pieces[sec])} tiles")
-            self.montages[sec] = self._assemble_montage(
-                img_h, img_w, feather_px, self.coord_key)
+            self.montages[sec] = self._assemble_montage(mrc_filepath, img_h, img_w, feather_px, self.coord_key)
         self.section = saved_section
 
         print(f"[INFO] Built {len(self.montages)} montage(s) at "
               f"{self.pixel_spacing_um:.4f} um/px")
         return self.montages
 
-    def parse_mdoc(self, mdoc_path=None):
-        mdoc_path = mdoc_path or self.path
+    def parse_mdoc(self, mdoc_filepath):
+        mdoc_path = mdoc_filepath
         global_info, pieces, mont_sections = {}, [], []
         current, ctype = global_info, "global"
         with open(mdoc_path, encoding="utf-8", errors="replace") as fh:
@@ -304,7 +301,7 @@ class MRCReader:
     # Montage assembly
     # ------------------------------------------------------------------ #
 
-    def _assemble_montage(self, img_h, img_w, feather_px, key):
+    def _assemble_montage(self, mdoc_filepath, img_h, img_w, feather_px, key):
         pieces = self.section_pieces[self.section]
 
         coords = [(p, float(self._get_coords(p, key)[0]), float(self._get_coords(p, key)[1])) for p in pieces]
@@ -323,7 +320,7 @@ class MRCReader:
 
         z_indices = [p["ZValue"] for p in pieces]
 
-        with mrcfile.open(self.path, mode="r", permissive=True) as mrc:
+        with mrcfile.open(mdoc_filepath, mode="r", permissive=True) as mrc:
             data = mrc.data
             if data is None:
                 raise ValueError("MRC contains no image data.")
@@ -377,7 +374,7 @@ class MRCReader:
     # ------------------------------------------------------------------ #
     # Refinement
     # ------------------------------------------------------------------ #
-    def refine_tile_alignment(self):
+    def refine_tile_alignment(self, mrc_filepath):
         from skimage.registration import phase_cross_correlation as _pcc
 
         OUT_KEY = "RefinedPieceCoordinates"
@@ -405,7 +402,7 @@ class MRCReader:
             gy = int(round(float(pc[1]) / ps_y)) if ps_y > 0 else 0
             grid[(gx, gy)] = p
 
-        with mrcfile.open(self.path, mode="r", permissive=True) as mrc:
+        with mrcfile.open(mrc_filepath, mode="r", permissive=True) as mrc:
             if mrc.data is None or mrc.data.ndim != 3:
                 print("[refine] MRC is a single 2-D image - cannot refine.")
                 return pieces
@@ -507,13 +504,13 @@ class MRCReader:
     # ------------------------------------------------------------------ #
     # Display
     # ------------------------------------------------------------------ #
-    def show(self, contrast_percentiles=(1.0, 99.0)):
+    def show(self, mrc_filepath, contrast_percentiles=(1.0, 99.0)):
         import matplotlib.pyplot as plt
         sec = self.section
 
         if self.section_pieces and sec in self.section_pieces:
-            key = self._display_key()                 # refines if needed
-            img = self._assemble_montage(*self._img_hw, self._feather_px, key)[0]
+            key = self._display_key(mrc_filepath=mrc_filepath)                 # refines if needed
+            img = self._assemble_montage(mrc_filepath, *self._img_hw, self._feather_px, key)[0]
 
         elif self.mrc_image is not None:
             img, key, tile = self.mrc_image, None, None
@@ -540,23 +537,24 @@ class MRCReader:
     # Create Dictionary Output Summarizing aligned Montage
     # ------------------------------------------------------------------ #
 
-    def build_montage_summary(self, alignment="fine"):
-        field_map = {"nominal": "PieceCoordinates",
-                    "sloppy":  "AlignedPieceCoordsVS",
-                    "fine":    "RefinedPieceCoordinates"}
-        if alignment not in field_map:
-            raise ValueError(f"alignment must be one of {list(field_map)}")
-        key    = field_map[alignment]
+    def build_montage_summary(self, mrc_filepath):
+        if self.refine_alignment:
+            alignment = "fine"
+            key = "RefinedPieceCoordinates"
+        else:
+            alignment = self.coord_key
+            key = self.coord_key
+
         pieces = self.section_pieces[self.section]
 
-        if alignment == "fine" and all(p.get("RefinedPieceCoordinates") is None
-                                    for p in pieces):
-            self.refine_tile_alignment()
+        if self.refine_alignment and all(p.get("RefinedPieceCoordinates") is None
+                                         for p in pieces):
+            self.refine_tile_alignment(mrc_filepath=mrc_filepath)
 
         pix_um   = self.pixel_spacing_um
         theta       = np.deg2rad(self._section_rotation_angle(pieces))
 
-        img, min_x, min_y = self._assemble_montage(*self._img_hw, self._feather_px, key)
+        img, min_x, min_y = self._assemble_montage(mrc_filepath,*self._img_hw, self._feather_px, key)
                 
         tiles = []
         for p in pieces:
@@ -572,16 +570,18 @@ class MRCReader:
                   f"det={fit['det']:+.3e} ({'flip' if fit['det'] < 0 else 'no flip'}) "
                   f"rms={fit['rms_um']:.4f} um max={fit['max_um']:.4f} um")
         else:
-            print(f"[fit] pixel -> stage n={fit['n']}  {fit['reason']}")
+            print(f"[fit] pixel -> stage n={fit['n']}  {fit['message']}")
 
         return {"image": img, "min_x": min_x, "min_y": min_y,
                 "pixel_spacing_um": pix_um, "rotation_deg": float(np.rad2deg(theta)),
                 "img_hw": self._img_hw, "section": self.section,
                 "alignment": alignment, "tiles": tiles,
-                "stage_matrix": M, "stage_fit": fit}
+                "stage_matrix": M, "stage_fit": fit,
+                "path": self.tem.path,
+                "position": Path(mrc_filepath).parent.name }
 
-    def run_montage_loader_and_create_summary(self):
+    def run_montage_loader_and_create_summary(self, mrc_filepath):
         if not self.section_pieces:
-            self.load_mrc_montage() 
-        self.show(contrast_percentiles=(1.0, 99.))
-        return self.build_montage_summary()
+            self.load_mrc_montage(mrc_filepath=mrc_filepath) 
+        self.show(mrc_filepath=mrc_filepath, contrast_percentiles=(1.0, 99.))
+        return self.build_montage_summary(mrc_filepath = mrc_filepath)
