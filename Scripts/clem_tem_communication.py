@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 sys.path.append(r"C:\Program Files\SerialEM\PythonModules")
 print(sys.executable)
 print(sys.version)
@@ -10,16 +11,22 @@ import math
 
 class TEMComm:
 
-    ACQUIRE = {
-                    "View":    sem.View,
-                    "Record":  sem.Record,
-                    "Search":  sem.Search,
-                    "Preview": sem.Preview,
-                }
+    
 
-    def __init__(self, path, rotation=True):
-        self.path = path
+    def __init__(self, path, rotation=True, offline=False):
+        self.output_root = path
         self.rotation = rotation
+        self.ACQUIRE = {
+                        "View":    sem.View,
+                        "Record":  sem.Record,
+                        "Search":  sem.Search,
+                        "Preview": sem.Preview,
+                    }
+        if offline:
+            sem.NoMessageBoxOnError()
+            print("[INFO] SerialEM is running in offline mode. No commands will be sent to the microscope.")
+   
+
 
     # ---------------------------------------------------------------------------
     # control image acquisition and navigator handling
@@ -31,64 +38,90 @@ class TEMComm:
         if sem.ReportIfNavOpen() > 0:
             sem.CloseNavigator()
             
-        nav_file = os.path.join(self.path, "nav_file" + "_" + timestamp + '.nav')
+        nav_file = os.path.join(self.output_root, "nav_file" + "_" + timestamp + '.nav')
         sem.OpenNavigator(nav_file)
 
-    def _load_mrc_in_nav(self, mrc_file, path=None, buffer="0"):
+    def add_stage_pos_to_nav(self, picks):
         if sem.ReportIfNavOpen() == 0:
             self._create_nav_file()
-        sem.CloseFile()
-        if path is not None:
-            sem.ReadOtherFile(0, buffer, os.path.join(path, mrc_file))
+        _, _, default_stage_z_um = sem.ReportStageXYZ()
+        pt_id = int(sem.GetUniqueNavID())
+        for pick in picks:
+            if pick['stage_z_um'] is not None:
+                sem.AddStagePosAsNavPoint(pick['stage_x_um'], pick['stage_y_um'], pick['stage_z_um'], pt_id)
+            else:
+                sem.AddStagePosAsNavPoint(pick['stage_x_um'], pick['stage_y_um'], default_stage_z_um, pt_id)
+            sem.ChangeItemNote(int(pt_id), pick['pick_id'])
+
+    def _identify_montage_file(self, site_id):
+        if site_id is not None:
+            matches = list(Path(os.path.join(self.output_root, site_id)).glob("*montage*.mrc"))
+        else:
+            matches = list(Path(self.output_root).glob("*montage*.mrc"))
+        if not matches:
+            raise FileNotFoundError(f"No montage .mrc found in {self.output_root}")
+        montage_filename = str(max(matches, key=lambda p: p.stat().st_mtime))
+        return montage_filename
+
+    def _load_mrc_in_nav(self, mrc_file_name=None, buffer="0", site_id=None):
+        if sem.ReportIfNavOpen() == 0:
+            self._create_nav_file()
+
+        if mrc_file_name is None:
+            mrc_file_name = self._identify_montage_file(site_id=site_id)
+
+        if site_id is not None:
+            sem.ReadOtherFile(0, buffer, os.path.join(self.output_root, site_id, mrc_file_name))
+        else:
+            sem.ReadOtherFile(0, buffer, os.path.join(self.output_root, mrc_file_name))
         sem.NewMap()
         
-    def _save_buffer_image(self, position=None, token=None):
+    def _save_buffer_image(self, site_id=None, acquisition_type=None, label=None):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()
-        if position is not None:
-            filepath = os.path.join(self.path, position, position + '_mag_' + str(mag) + '_' + timestamp + '.mrc')
-        elif token is not None:
-            filepath = os.path.join(self.path, position, position + token + '_mag' + str(mag) + '_' + timestamp + '.mrc')
+
+        filename_parts = [site_id, acquisition_type, label, f"mag_{mag}", timestamp, '.mrc']
+        filename = "_".join(str(part).strip("_") for part in filename_parts if part is not None and str(part) != "")
+
+        if site_id is not None:
+            output_dir = os.path.join(self.output_root, site_id)
+            os.makedirs(output_dir, exist_ok=True)
         else:
-            filepath = os.path.join(self.path, 'Mag_' + str(mag) + '_' + timestamp + '.mrc')
-        sem.OpenNewFile(filepath)
+            output_dir = self.output_root
+
+        sem.OpenNewFile(output_dir, filename)
         sem.Save()                 
         sem.CloseFile()
 
-    def acquire_image(self, mode, lowdose=True, save=False, position=None, token=None):
-        if lowdose:
-            self.set_low_dose_imaging_state()
-            self.GoToLowDoseArea(mode)
-        else:
-            self.set_non_low_dose_imaging_state()
-
-        self.AQUIRE[mode]
-        if save:
-            self._save_buffer_image(position=position, token=token)
-
-
-    def _readout_image_properties(self, mode):
-        self.AQUIRE[mode]
+    def _readout_image_properties(self, mode, imaging_state=None):
+        self.prepare_imaging_state(mode=mode,imaging_state=imaging_state)
+        self.ACQUIRE[mode]()
         image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = sem.ImageProperties("A")
         return image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set
-    
-    def report_stage_position(self):
-        stage_x, stage_y, stage_z = sem.ReportStageXYZ()
-        stage_tilt = sem.ReportTiltAngle()
-        return (stage_x, stage_y, stage_z), stage_tilt
+
+    def acquire_image(self, mode, imaging_state=None, save=False, site_id=None, label=None):
+        self.prepare_imaging_state(mode=mode, imaging_state=imaging_state,)
+
+        self.ACQUIRE[mode]()
+        if save:
+            self._save_buffer_image(site_id=site_id, acquisition_type="image",label=label)
 
     # ---------------------------------------------------------------------------
     # fundamental microscope controls
     # ---------------------------------------------------------------------------
 
     def _reset_defocus(self):
-        sem.SetEucentricFocus()
-        sem.Delay(2, 'sec')
-        sem.ResetDefocus()
-        sem.Delay(2, 'sec')
+        mag_Index = sem.ReportMagIndex()[0]
+        if mag_Index > 5:
+            sem.SetEucentricFocus()
+            sem.Delay(2, 'sec')
+            sem.ResetDefocus()
+            sem.Delay(2, 'sec')
+        else:
+            print("[INFO] Defocus reset and eucentric focus skipped because the microscope is in LM mode.")
 
     def apply_specimen_shift(self, mode, specimen_shift):
-        sem.GoToLowDoseArea(mode)
+        sem.prepare_imaging_state(mode=mode)
         sem.Delay(1, 'sec')
         sem.ImageShiftByMicrons(specimen_shift[0], specimen_shift[1])
  
@@ -97,71 +130,99 @@ class TEMComm:
         eucentricity_settings = {'fine': 2, 'rough': 1, 'rough_fine': 3}
         sem.Eucentricity(eucentricity_settings[level])
 
-    def _set_low_dose_imaging_state(self):
+    def report_stage_position(self):
+        stage_x, stage_y, stage_z = sem.ReportStageXYZ()
+        stage_tilt = sem.ReportTiltAngle()
+        return stage_x, stage_y, stage_z, stage_tilt
+
+    def prepare_imaging_state(self, mode=None, imaging_state=None):
+        if imaging_state is None:
+            self.set_low_dose_imaging_state()
+            if mode is not None:
+                sem.GoToLowDoseArea(mode)
+            return "lowdose"
+        else:
+            self.set_non_low_dose_imaging_state(imaging_state)
+        sem.Delay(2, 'sec')
+        return imaging_state
+
+    def set_low_dose_imaging_state(self):
+        low_dose_mode_state = sem.ReportLowDoseMode()[0]
+        if not low_dose_mode_state:
+            sem.SetLowDoseMode(1)
+            sem.Delay(1, 'sec')
+            sem.NormalizeLenses(7)
+            print("[INFO] Switchted to Low Dose Mode.")
+        else:
+            print("[INFO] Already in Low Dose Mode.")
+
+    def set_non_low_dose_imaging_state(self, imaging_state):
         sem.SetLowDoseMode(0)
         sem.Delay(1, 'sec')
-        sem.NormalizeLenses(7)
-        print("[INFO] Switchted to Low Dose Mode.")
-
-    def _set_non_low_dose_imaging_state(self, imaging_state, defocus_multiplier):
-        sem.SetLowDoseMode(0)
-        sem.Delay(1, 'sec')
-
-        image_shift = {
-                   'grid_square': (2.688, -5.400),
-                   'LMM': (0.0, 0.0)
-                        }
-        defocus = {
-                   'grid_square': -10.0,
-                   'LMM': -50.0
-                        }
+        defocus = {'grid_square': -10.0, 'LMM': -50.0}
         
         if imaging_state in ['LMM', 'grid_square']:
             sem.GoToImagingState(imaging_state)
             sem.Delay(2, 'sec')
             sem.NormalizeLenses(7)
-            sem.Delay(2, 'sec')
-            sem.SetDefocus(defocus[imaging_state]*defocus_multiplier)
-            sem.SetImageShift(image_shift[imaging_state][0], image_shift[imaging_state][1])
+            sem.Delay(5, 'sec')
+            sem.SetDefocus(float(defocus[imaging_state]))
         else:
             raise ValueError(f"imaging_state {imaging_state} is not in the list of pre-defined imaging states.")
 
-        print(f"[INFO] Set magnficiation to {sem.ReportMag()[0]}, defocus to {defocus[imaging_state]*defocus_multiplier}, image shift to {sem.ReportImageShift()[0:2]}", )
-
-
-    def precise_stage_move(self, stage_position=None, tilt_angle=None):
+    def precise_stage_move(self, stage_x_um=None, stage_y_um=None, stage_z_um=None, stage_tilt=0.0):
         backlashTilt = 2.0
+        backlashXY = 5.0
 
-        if tilt_angle is not None:
+        if stage_tilt is not None:
             current_tilt = sem.ReportTiltAngle()
-            if current_tilt != tilt_angle:
-                if current_tilt > tilt_angle:
+            if current_tilt != stage_tilt:
+                if current_tilt > stage_tilt:
                     backlashTilt = backlashTilt * (-1)
-                sem.TiltTo(tilt_angle) + backlashTilt
-                sem.TiltTo(tilt_angle)
+                sem.TiltTo(stage_tilt + backlashTilt)
+                sem.TiltTo(stage_tilt)
                 sem.Delay(1, 'sec')
-        if stage_position is not None:
-            backlashX = 2.0
-            backlashY = 2.0
-            if len(stage_position) == 3:
-                sem.MoveStageTo(stage_position[0], stage_position[1], stage_position[2], backlashX, backlashY)
+
+        if stage_x_um is not None and stage_y_um is not None:
+            if stage_z_um is None:
+                sem.MoveStageTo(stage_x_um - backlashXY, stage_y_um - backlashXY)
+                sem.Delay(1, 'sec')
+                sem.MoveStageTo(stage_x_um, stage_y_um)
             else:
-                sem.MoveStageTo(stage_position[0], stage_position[1], backlashX, backlashY)
-            sem.Delay(2, 'sec')
+                sem.MoveStageTo(stage_x_um - backlashXY, stage_y_um - backlashXY, stage_z_um)
+                sem.Delay(1, 'sec')
+                sem.MoveStageTo(stage_x_um, stage_y_um, stage_z_um)
+                     
+        sem.Delay(2, 'sec')
+    
+    def precise_stage_move_relative(self, stage_x_um, stage_y_um, stage_z_um=None):
+
+        backlashXY = 5.0
+
+        if stage_x_um is None or stage_y_um is None:
+            return
+
+        if stage_z_um is None:
+            sem.MoveStage(stage_x_um - backlashXY, stage_y_um - backlashXY)
+            sem.Delay(1, 'sec')
+            sem.MoveStage(backlashXY, backlashXY)
+        else:
+            sem.MoveStage(stage_x_um - backlashXY, stage_y_um - backlashXY, stage_z_um)
+            sem.Delay(1, 'sec')
+            sem.MoveStage(backlashXY, backlashXY, 0.0)
 
     # ---------------------------------------------------------------------------
     # Montage control
     # ---------------------------------------------------------------------------
 
-    def acquire_montage(self, imaging_state, fov_um_x, fov_um_y, tilt_angle, low_dose=True, position=None):
-        if low_dose:
-            self._set_low_dose_imaging_state(imaging_state)
-        else:
-            self._set_non_low_dose_imaging_state(imaging_state)
-
-        self.precise_stage_move(tilt_angle=tilt_angle)
+    def acquire_montage(self, fov_um_x, fov_um_y, stage_tilt=0.0, site_id=None, imaging_state=None):
+        
+        self.prepare_imaging_state(mode="View", imaging_state=imaging_state)
+        
+        self.precise_stage_move(stage_tilt=stage_tilt)
         self.set_eucentricity(level='rough')
-        image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = self._readout_image_properties(mode="Record")
+
+        image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = self._readout_image_properties(mode="View")
 
         tile_fov_um_x = image_x_pxl * pxl_size_nm/1000
         tile_fov_um_y = image_y_pxl * pxl_size_nm/1000
@@ -178,10 +239,12 @@ class TEMComm:
 
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()
-        if position is not None:
-            filepath = os.path.join(self.path, position, position + '_mag_' + str(mag) + '_montage_' + timestamp + '.mrc')
+        if site_id is not None:
+            filepath = os.path.join(self.output_root, site_id, site_id + '_montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
+            os.makedirs(os.path.join(self.output_root, site_id), exist_ok=True)
         else:
-            filepath = os.path.join(self.path, 'Mag_' + str(mag) + '_montage_' + timestamp + '.mrc')
+            filepath = os.path.join(self.output_root, 'Montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
+        
         sem.OpenNewMontage(nx, ny, filepath)
         sem.SetMontageParams(int(1),    # useStage = 1 (stage montage, required for hybrid usage of both image shift and stage shift)
                         overlap_pxl_x,    # overlap in x in pxl
@@ -193,103 +256,17 @@ class TEMComm:
                         -1.0)            # max image shift in micron, only relevant when first argument is 2, otherwise set to -1
 
         sem.Montage()
-        if position is not None:
-            sem.NewMap(0, position + '_' + timestamp)
-        else:
-            sem.NewMap(0, 'montage' + '_' + timestamp)
-
-    def show_nav_adjustment(self):
-        rows = []
-        for i, p in enumerate(self.picks, start=1):
-            coord = p.get(self.rotation)
-            if coord is None:
-                continue
-            sx, sy = float(coord[0]), float(coord[1])
-            ax, ay = sem.AdjustStagePosForNav(sx, sy)
-            ax, ay = float(ax), float(ay)
-            rows.append({"n": i, "stage_z": p.get("stage_z"),
-                        "raw": (sx, sy), "adjusted": (ax, ay),
-                        "delta": (ax - sx, ay - sy)})
-
-        if not rows:
-            print(f"No picks with a '{self.rotation}' coordinate to test.")
-            return rows
-
-        print(f"\nAdjustStagePosForNav effect (coord = '{self.rotation}')")
-        print(f"{'#':>3}  {'stageZ':>8}  "
-            f"{'raw X':>10} {'raw Y':>10}   "
-            f"{'adj X':>10} {'adj Y':>10}   "
-            f"{'dX':>8} {'dY':>8}")
-        print("-" * 86)
-        for r in rows:
-            zs = "n/a" if r["stage_z"] is None else f"{r['stage_z']:.3f}"
-            print(f"{r['n']:>3}  {zs:>8}  "
-                f"{r['raw'][0]:>10.3f} {r['raw'][1]:>10.3f}   "
-                f"{r['adjusted'][0]:>10.3f} {r['adjusted'][1]:>10.3f}   "
-                f"{r['delta'][0]:>8.4f} {r['delta'][1]:>8.4f}")
-
-        dxs = [r["delta"][0] for r in rows]
-        dys = [r["delta"][1] for r in rows]
-        print("-" * 86)
-        print(f"mean delta : ({sum(dxs)/len(dxs):.4f}, {sum(dys)/len(dys):.4f}) um")
-        print(f"delta spread (max-min): "
-            f"({max(dxs)-min(dxs):.4g}, {max(dys)-min(dys):.4g}) um")
-        if (max(dxs)-min(dxs)) < 1e-3 and (max(dys)-min(dys)) < 1e-3:
-            print("=> delta CONSTANT: rigid shift, relative geometry preserved.")
-        else:
-            print("=> delta VARIES: not a pure rigid shift (check mag/tilt/IS state).")
-
-        zvals = [r["stage_z"] for r in rows if r["stage_z"] is not None]
-        if not zvals:
-            print("NOTE: stage_z is None for all picks - mdoc has no stage Z, "
-                "supply a default before AddStagePosAsNavPoint.")
-        return rows
-    
-    def add_stage_pos_to_nav(self, picks):
-        if sem.ReportIfNavOpen() == 0:
-            self._create_nav_file()
-        _, _, default_z = sem.ReportStageXYZ()
-        pt_id = int(sem.GetUniqueNavID())
-        for p in picks:
-            sx, sy = p["stage"]
-            z = p["stage_z"] if p["stage_z"] is not None else default_z
-            sem.AddStagePosAsNavPoint(sx, sy, z, pt_id)
-
-    def run_picks_visualization(self, mrc_file, picks):
-        self._load_mrc_in_nav(mrc_file=mrc_file, path=None)
-        self.add_stage_pos_to_nav(picks=picks)
-
-
-
-    def acquire_image(self, mode):
-
-        if mode in ["View", "Search", "Record", "Preview"]:
-            sem.GoToLowDoseArea(mode)
-        else:
-            raise ValueError("Selected acquisition mode not available.")
-
-        if mode == 'View':
-            sem.V()
-        elif mode == 'Record':
-            sem.R()
-        elif mode == 'Preview':
-            sem.Preview()
-        elif mode == 'Search':
-            sem.S()
-        else:
-            raise ValueError("Selected acquisition mode no available.")
         
-        imgX, imgY, _, live_img_px = sem.ImageProperties()
-        return (imgX, imgY, live_img_px)
-        
+        if site_id is not None:
+            sem.NewMap(0, site_id + '_montage_' + timestamp)
+        else:
+            sem.NewMap(0, 'Montage' + '_' + timestamp)
+            
+    # ---------------------------------------------------------------------------
+    # Alignment routines
+    # ---------------------------------------------------------------------------
 
-    def convert_stage_img_pos(self, buf, direction, coords):
-        if direction == 'to_stage':
-            sem.BufImagePosToStagePos(buf, 1, coords[0], coords[1])[:2]
-        elif direction == 'to_img':
-            sem.StagePosToBufImagePos(buf, 1, coords[0], coords[1])
-
-    def run_serialem_alignment_routine(self, buffer, mode, pick_id, mag_compensation=True, debug_display=False, eucentric=False):
+    def run_serialem_alignment_routine(self, buffer, mode, pick_id, mag_compensation=True, debug_display=False, eucentric=False, site_id=None):
 
         if eucentric is True:
             self.set_eucentricity(level='fine')
@@ -301,23 +278,22 @@ class TEMComm:
 
         if mag_compensation is True:
             sem.AlignBetweenMags(buffer, -1, -1, -1, 0, -1, int(0)) # buffer, center X in the reference, center Y in the reference, max allowed shift (negative means field of view, positive microns), scale (default: 4%), rotation (default: 3 degrees), avoid_image_shift
-            self._save_buffer_image(token=f"mag_adjusted_{pick_id}")
+            self._save_buffer_image(site_id=site_id, acquisition_type='mag_adjusted_image', label=pick_id)
             buffer = "Q"
             sem.Copy("B", buffer) 
 
         max_iter = 5
         iteration = 0
-        ss_shift = np.array([np.inf, np.inf])
+        stage_shift = np.array([np.inf, np.inf])
         
-        while np.linalg.norm(ss_shift) > 0.5 and iteration < max_iter:
-            self.acquire_image(mode=mode)
-            sem.AlignTo(buffer, int(0), int(0), int(0), debug) #don't apply imageshift, #trimming, #correlation peak handling
-            shift = sem.ReportAlignShift()
-            ss_shift = np.array(shift[4:6]) / 1000
+        while np.linalg.norm(stage_shift) > 0.1 and iteration < max_iter:
+            self.acquire_image(mode=mode, save=False, site_id=site_id, label=f"pre_align_{pick_id}")
+            sem.AlignTo(buffer, int(1), int(0), int(0), debug) #don't apply imageshift, #trimming, #correlation peak handling
+            required_shift = sem.ReportAlignShift()
+            stage_shift = np.array(required_shift[4:6]) / 1000
             ss2s = np.array(sem.SpecimenToStageMatrix(0)).reshape((2, 2))
-            stage_shift = ss2s @ ss_shift     
-            #sem.MoveStage(-stage_shift[0], -stage_shift[1])
-            sem.TestRelaxingStage(-stage_shift[0], -stage_shift[1], 3.0) # last number is the backlash correction
+            applied_stage_shift = ss2s @ stage_shift     
+            self.precise_stage_move_relative(stage_x_um=applied_stage_shift[0], stage_y_um=applied_stage_shift[1])
             iteration += 1 
             if debug_display is True:
                 sem.AddBufToStackWindow("A", 0, 0, 0, 0, f"CC_{iteration}")
@@ -329,13 +305,66 @@ class TEMComm:
         self.acquire_image(mode=mode)
         sem.AlignTo(buffer, int(0), int(0), int(1), debug) #use image shift to compensate
         shift = sem.ReportAlignShift()
-        print(f"[INFO] The final shift is {np.linalg.norm(shift[4:6])/1000} um.")
-        if np.linalg.norm(shift[4:6]) > 0.5:
+        print(f"[INFO] The misalignment determined for the final image is{np.linalg.norm(shift[4:6])/1000} um.")
+        if np.linalg.norm(shift[4:6]) > 0.1:
             raise RuntimeError("Alignment failed.")
-        self.acquire_image(mode=mode)
-        self._save_buffer_image(token=f"_pick_{pick_id}_{mode}")
-        stage_x, stage_y, stage_z = sem.ReportStageXYZ()
-        shift_x, shift_y = sem.ReportSpecimenShift()
+        self.acquire_image(mode=mode, save=True, site_id=site_id, label=f"{pick_id}_aligned_target_{mode}")
+        stage_x_um, stage_y_um, stage_z_um = sem.ReportStageXYZ()
+        return {"site_id": site_id, "pick_id": pick_id, "stage_x_um": stage_x_um, "stage_y_um": stage_y_um, "stage_z_um": stage_z_um, "mode": mode}     
 
-        return {"stage": (stage_x, stage_y), "stageZ": stage_z, "specimen_shift": (shift_x, shift_y)}
+    # ---------------------------------------------------------------------------
+    # Functions for troubleshooting and debugging
+    # ---------------------------------------------------------------------------
+
+    def show_nav_adjustment(self):
+        rows = []
+        for i, p in enumerate(self.picks, start=1):
+            coord = p.get(self.rotation)
+            if coord is None:
+                continue
+            sx, sy = float(coord[0]), float(coord[1])
+            ax, ay = sem.AdjustStagePosForNav(sx, sy)
+            ax, ay = float(ax), float(ay)
+            rows.append({"pick_id": i, "stage_z_um": p.get("stage_z_um"),
+                        "raw_stage_xy_um": (sx, sy), "adjusted_stage_xy_um": (ax, ay),
+                        "delta_stage_xy_um": (ax - sx, ay - sy)})
+
+        if not rows:
+            print(f"No picks with a '{self.rotation}' coordinate to test.")
+            return rows
+
+        print(f"\nAdjustStagePosForNav effect (coord = '{self.rotation}')")
+        print(f"{'#':>3}  {'stage_z_um':>8}  "
+            f"{'stage_x_um':>10} {'stage_y_um':>10}   "
+            f"{'adjusted_stage_x':>10} {'adjusted_stage_y':>10}   "
+            f"{'delta_stage_x':>8} {'delta_stage_y':>8}")
+        print("-" * 86)
+        for r in rows:
+            zs = "n/a" if r["stage_z_um"] is None else f"{r['stage_z_um']:.3f}"
+            print(f"{r['pick_id']:>3}  {zs:>8}  "
+                f"{r['raw_stage_xy_um'][0]:>10.3f} {r['raw_stage_xy_um'][1]:>10.3f}   "
+                f"{r['adjusted_stage_xy_um'][0]:>10.3f} {r['adjusted_stage_xy_um'][1]:>10.3f}   "
+                f"{r['delta_stage_xy_um'][0]:>8.4f} {r['delta_stage_xy_um'][1]:>8.4f}")
+
+        dxs = [r["delta_stage_xy_um"][0] for r in rows]
+        dys = [r["delta_stage_xy_um"][1] for r in rows]
+        print("-" * 86)
+        print(f"mean delta : ({sum(dxs)/len(dxs):.4f}, {sum(dys)/len(dys):.4f}) um")
+        print(f"delta spread (max-min): "
+            f"({max(dxs)-min(dxs):.4g}, {max(dys)-min(dys):.4g}) um")
+        if (max(dxs)-min(dxs)) < 1e-3 and (max(dys)-min(dys)) < 1e-3:
+            print("=> delta CONSTANT: rigid shift, relative geometry preserved.")
+        else:
+            print("=> delta VARIES: not a pure rigid shift (check mag/tilt/IS state).")
+
+        zvals = [r["stage_z_um"] for r in rows if r["stage_z_um"] is not None]
+        if not zvals:
+            print("NOTE: stage_z is None for all picks - mdoc has no stage Z, "
+                "supply a default before AddStagePosAsNavPoint.")
+        return rows
+    
+
+    def run_picks_visualization(self, mrc_file_name, picks, site_id=None):
+        self._load_mrc_in_nav(mrc_file_name=mrc_file_name,buffer='A', site_id=site_id)
+        self.add_stage_pos_to_nav(picks=picks)
 
