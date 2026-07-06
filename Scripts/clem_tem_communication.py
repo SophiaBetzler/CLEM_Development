@@ -13,8 +13,9 @@ class TEMComm:
 
     
 
-    def __init__(self, path, rotation=True, offline=False):
+    def __init__(self, path, mrc_reader, rotation=True, offline=False):
         self.output_root = path
+        self.mrc_reader = mrc_reader
         self.rotation = rotation
         self.ACQUIRE = {
                         "View":    sem.View,
@@ -53,22 +54,12 @@ class TEMComm:
                 sem.AddStagePosAsNavPoint(pick['stage_x_um'], pick['stage_y_um'], default_stage_z_um, pt_id)
             sem.ChangeItemNote(int(pt_id), pick['pick_id'])
 
-    def _identify_montage_file(self, site_id):
-        if site_id is not None:
-            matches = list(Path(os.path.join(self.output_root, site_id)).glob("*montage*.mrc"))
-        else:
-            matches = list(Path(self.output_root).glob("*montage*.mrc"))
-        if not matches:
-            raise FileNotFoundError(f"No montage .mrc found in {self.output_root}")
-        montage_filename = str(max(matches, key=lambda p: p.stat().st_mtime))
-        return montage_filename
-
     def _load_mrc_in_nav(self, mrc_file_name=None, buffer="0", site_id=None):
         if sem.ReportIfNavOpen() == 0:
             self._create_nav_file()
-
+        
         if mrc_file_name is None:
-            mrc_file_name = self._identify_montage_file(site_id=site_id)
+            mrc_file_name = self.mrc_reader.identify_montage_file(site_id=site_id)
 
         if site_id is not None:
             sem.ReadOtherFile(0, buffer, os.path.join(self.output_root, site_id, mrc_file_name))

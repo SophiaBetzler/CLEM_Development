@@ -14,13 +14,13 @@ FILENAME = "lamella-1-mmm-test-5x5-6500.mrc"
 if __name__ == "__main__":
     mrc = MRCReader(coord_key="AlignedPieceCoordsVS", refine_alignment=True, section=0)
 
-    temcom = TEMComm(rotation="rotation", path=PATH, offline=True)
+    temcom = TEMComm(rotation="rotation", mrc_reader=mrc, path=PATH, offline=True)
 
     exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, path=PATH, sample_type=SAMPLE_TYPE)
 
-    exc.run_experiment_setup()
+    #exc.run_experiment_setup()
     #exc.run_acquire_position_montages()
-    #exc.run_clem_alignment()
+    exc.run_clem_alignment()
 
     #picker = CLEMPicker(montage=mrc.run_montage_loader_and_create_summary(), navigator=temcom)
     

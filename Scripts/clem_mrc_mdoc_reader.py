@@ -199,6 +199,15 @@ class MRCReader:
             return "RefinedPieceCoordinates"
         return self.coord_key
     
+    def identify_montage_file(self, site_id):
+        if site_id is not None:
+            matches = list(Path(os.path.join(self.output_root, site_id)).glob("*montage*.mrc"))
+        else:
+            matches = list(Path(self.output_root).glob("*montage*.mrc"))
+        if not matches:
+            raise FileNotFoundError(f"No montage .mrc found in {self.output_root}")
+        montage_filename = str(max(matches, key=lambda p: p.stat().st_mtime))
+        return montage_filename
 
     # ------------------------------------------------------------------ #
     # Loaders
