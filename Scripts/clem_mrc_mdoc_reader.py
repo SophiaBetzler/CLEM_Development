@@ -24,8 +24,8 @@ class MRCReader:
         self.montages       = {}            # {section: assembled array}
         self.section_pieces = {}            # {section: [tile dicts]}
         self.pixel_spacing_um = None
-        self._img_hw = None
-        self._feather_px = None
+        self.mrc_image_hw = None
+        self._feather_pixels = None
         self._global_info = None
 
     # ------------------------------------------------------------------ #
@@ -40,35 +40,36 @@ class MRCReader:
                 f"Tile ZValue={piece.get('ZValue')} has no '{coord_key}'.")
         return v
     
-        
     @staticmethod
-    def _px(piece, field):
+    def _piece_xy_position(piece, field):
         c = piece.get(field)
-        return (float(c[0]), float(c[1])) if c is not None else None
+        if c is None:
+            return None
+        return {"pick_x_um": float(c[0]), "pick_y_um": float(c[1])}
     
     @staticmethod
-    def _stage_xy(piece):
+    def _piece_stage_xy_position(piece):
         stage_position = piece.get("StagePosition")
         if isinstance(stage_position, (list, tuple)) and len(stage_position) >= 2:
-            return float(stage_position[0]), float(stage_position[1])
+            return {"stage_x_um": float(stage_position[0]), "stage_y_um": float(stage_position[1])} 
         return None
     
-    def _piece_stage_z(self, piece):
+    def _piece_stage_z_position(self, piece):
         stage_position = piece.get("StagePosition")
         if isinstance(stage_position, (list, tuple)) and len(stage_position) >= 3:
-            return float(stage_position[2])
+            return {"stage_z_um": float(stage_position[2])}
         
         for k in ("StageZ", "Z"):
             v = piece.get(k)
             if v is not None:
-                return float(v[0] if isinstance(v, (list, tuple)) else v)
+                return {"stage_z_um": float(v[0] if isinstance(v, (list, tuple)) else v)}
             
         global_info = self._global_info
         if global_info:
             for k in ("StageZ", "Z"):
                 v = global_info.get(k)
                 if v is not None:
-                    return float(v[0] if isinstance(v, (list, tuple)) else v)
+                    return {"stage_z_um": float(v[0] if isinstance(v, (list, tuple)) else v)}
         return None
 
     def _section_rotation_angle(self, pieces):
@@ -325,8 +326,8 @@ class MRCReader:
             "mrc_path": mrc_path,
             "montages": montages,
             "section_pieces": self.section_pieces,
-            "img_hw": self._img_hw,
-            "feather_px": self._feather_px,
+            "mrc_image_hight_width": self._img_hw,
+            "feather_pixel": self._feather_px,
             "pixel_spacing_um": self.pixel_spacing_um,
         }
 
@@ -372,10 +373,10 @@ class MRCReader:
         tiff_stack, tiff_info = self.load_ome_tiff(ome_path)
 
         return {
-            "ome_path": ome_path,
-            "tiff_stack": tiff_stack,
-            "tiff_info": tiff_info,
-        }
+                    "tiff_ome_path": ome_path,
+                    "tiff_stack_czyx": tiff_stack,
+                    "tiff_info": tiff_info,
+                }
 
     def parse_mdoc(self, mdoc_filepath):
         mdoc_path = mdoc_filepath
@@ -473,8 +474,8 @@ class MRCReader:
         M, t = sol[:2].T, sol[2]
 
         residuals = np.hypot(*(P @ M.T + t - S).T)
-        info = {"n": len(pts),
-                "det": float(np.linalg.det(M)),
+        info = {"number_pieces": len(pts),
+                "determinant": float(np.linalg.det(M)),
                 "angle_deg": float(np.degrees(np.arctan2(M[1, 0], M[0, 0]))),
                 "rms_um": float(np.sqrt(np.mean(residuals ** 2))),
                 "max_um": float(residuals.max()),}
@@ -672,9 +673,9 @@ class MRCReader:
         for p in pieces:
             tiles.append({
                         "z": p.get("ZValue"), 
-                        "stage_z": self._piece_stage_z(p),
-                        "px": self._px(p, key),
-                        "stage": self._stage_xy(p),
+                        "stage_z    ": self._piece_stage_z_position(p),
+                        "px": self._piece_xy_position(p, key),
+                        "stage":  self._piece_stage_xy_position(p),
                         })
         M, fit = self._fit_pixel_to_stage_rotation_matrix(tiles)
         if M is not None:
@@ -684,13 +685,19 @@ class MRCReader:
         else:
             print(f"[fit] pixel -> stage n={fit['n']}  {fit['message']}")
 
-        return {"image": img, "min_x": min_x, "min_y": min_y,
-                "pixel_spacing_um": pix_um, "rotation_deg": float(np.rad2deg(theta)),
-                "img_hw": self._img_hw, "section": self.section,
-                "alignment": alignment, "tiles": tiles,
-                "stage_matrix": M, "stage_fit": fit,
-                "path": self.tem.path,
-                "position": Path(mrc_filepath).parent.name }
+        return {"image": img, 
+                "min_x_pixels": min_x, 
+                "min_y_pixels": min_y,
+                "pixel_spacing_um": pix_um, 
+                "rotation_deg": float(np.rad2deg(theta)),
+                "mrc_image_height_width": self._img_hw, 
+                "section": self.section,
+                "alignment": alignment, 
+                "tiles": tiles,
+                "stage_matrix": M, 
+                "stage_fit": fit,
+                "path": self.output_root,
+                "site_id": Path(mrc_filepath).parent.name }
 
     def run_montage_loader_and_create_summary(self, mrc_filepath):
         if not self.section_pieces:
