@@ -327,7 +327,7 @@ class TEMComm:
             raise RuntimeError("Align routine didn't converge within 5 iterations.")
         
         self.acquire_image(mode=mode)
-        sem.AlignTo(buffer, int(0), int(0), int(1), debug) #use image shift to compensate
+        sem.AlignTo(buffer, int(0), int(0), int(0), debug) 
         shift = sem.ReportAlignShift()
         print(f"[INFO] The final shift is {np.linalg.norm(shift[4:6])/1000} um.")
         if np.linalg.norm(shift[4:6]) > 0.5:
