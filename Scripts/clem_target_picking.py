@@ -238,6 +238,7 @@ class CLEMPicker:
     # ------------------------------------------------------------------ #
     # Group Picks and Define Target
     # ------------------------------------------------------------------ #
+    
     def group_picks(self, radius_um=5.0, lone_offset_um=2.5):
     
         if not self.pick_fine_aligned:
