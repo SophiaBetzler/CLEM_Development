@@ -121,13 +121,16 @@ class ExecutiveControls:
 ### I think the run_clem_alignment function should be changed anyways to call the overlay tool.
 
     def run_clem_alignment(self):
+        from clem_ui import RegistrationApp   
         tem_stage_positions = self._import_csv_file('tem_stage_positions_refined.csv')
         for site in tem_stage_positions:
-            montage_file = self.mrc_reader.identify_montage_file(site_id=site.get("name"))
-            montage_summary = self.mrc.run_montage_loader_and_create_summary(os.path.join(self.path, montage_file))
-            from clem_target_picking import CLEMPicker
-            target_picker = CLEMPicker(montage_settings=montage_summary, tem_communication=self.tem)
-            target_picker.run_auto_picker()
+            print(site['name'])
+            ui = RegistrationApp(mrc_reader=self.mrc, site_id=site['name'])
+            ui.mainloop()
+        #     montage_summary = self.mrc.run_montage_loader_and_create_summary(os.path.join(self.path, montage_file))
+        #     from clem_target_picking import CLEMPicker
+        #     target_picker = CLEMPicker(montage_settings=montage_summary, tem_communication=self.tem)
+        #     target_picker.run_auto_picker()
 
      
         

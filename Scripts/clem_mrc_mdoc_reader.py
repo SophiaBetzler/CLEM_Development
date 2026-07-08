@@ -15,8 +15,9 @@ class MRCReader:
     MONTAGE_FLIP_X = False
     MONTAGE_FLIP_Y = True
 
-    def __init__(self, coord_key, refine_alignment=True, section=0):
+    def __init__(self, coord_key, path, refine_alignment=True, section=0):
         self.coord_key = coord_key
+        self.output_root = path
         self.section = section
         self.refine_alignment = refine_alignment
         self.mrc_image      = None          # single-image mode; None until loaded
@@ -143,11 +144,31 @@ class MRCReader:
     # File / coordinate-field discovery
     # ------------------------------------------------------------------ #
 
+    def _get_site_folder(self, site_id):
+        return Path(self.output_root) / site_id
+
+    def _find_latest_montage_mrc(self, site_id):
+        folder = self._get_site_folder(site_id)
+        matches = [p for p in folder.glob("*montage*.mrc") if p.is_file()]
+        if not matches:
+            raise FileNotFoundError(f"No montage .mrc found in {folder}")
+        return max(matches, key=lambda p: p.stat().st_mtime)
+        
+    def _find_latest_ome_tiff(self, site_id):
+        folder = self._get_site_folder(site_id)
+
+        matches = list(folder.glob("*.ome.tif")) + list(folder.glob("*.ome.tiff"))
+
+        if not matches:
+            raise FileNotFoundError(f"No OME-TIFF found in {folder}")
+
+        return max(matches, key=lambda p: p.stat().st_mtime)
+
     def _find_mdoc_path(self, mrc_filepath):
         directory = os.path.dirname(mrc_filepath)
         stem, ext = os.path.splitext(mrc_filepath)
         candidates = [
-                        mrc_filepath + ".mdoc",                      # foo.mrc.mdoc
+                        os.fspath(mrc_filepath) + ".mdoc",                      # foo.mrc.mdoc
                         stem + ".mdoc",                           # foo.mdoc
                         stem + ext.replace(".", "_") + ".mdoc",   # foo_mrc.mdoc
                     ]
@@ -213,7 +234,29 @@ class MRCReader:
     # Loaders
     # ------------------------------------------------------------------ #
 
-    def load_mrc_single(self, mrc_filepath):
+    
+    def load_latest_from_site(self, site_id):
+
+        mrc_path = self._find_latest_montage_mrc(site_id)
+        ome_path = self._find_latest_ome_tiff(site_id)
+
+        mrc_data = self.load_mrc_montage_data(mrc_path)
+        tiff_data = self.load_ome_tiff_data(ome_path)
+
+        data = {
+            "site_id": site_id,
+            "folder": self._get_site_folder(site_id),
+            **mrc_data,
+            **tiff_data,
+        }
+
+        self.current_data = data
+        return data
+
+
+    def load_mrc_single(self, mrc_filepath=None):
+        if mrc_filepath is None:
+            raise ValueError("No MRC file path provided.")
         with mrcfile.open(mrc_filepath, mode="r", permissive=True) as mrc:
             data = mrc.data.copy()
             voxel = mrc.voxel_size
@@ -267,12 +310,72 @@ class MRCReader:
             self.section = sec
             print(f"[INFO] Assembling section {sec}: "
                   f"{len(self.section_pieces[sec])} tiles")
-            self.montages[sec] = self._assemble_montage(mrc_filepath, img_h, img_w, feather_px, self.coord_key)
+            montage, min_x, min_y = self._assemble_montage(mrc_filepath, img_h, img_w, feather_px, self.coord_key)
+            self.montages[sec] = montage
         self.section = saved_section
 
         print(f"[INFO] Built {len(self.montages)} montage(s) at "
               f"{self.pixel_spacing_um:.4f} um/px")
         return self.montages
+    
+    def load_mrc_montage_data(self, mrc_path):
+        montages = self.load_mrc_montage(mrc_path)
+
+        return {
+            "mrc_path": mrc_path,
+            "montages": montages,
+            "section_pieces": self.section_pieces,
+            "img_hw": self._img_hw,
+            "feather_px": self._feather_px,
+            "pixel_spacing_um": self.pixel_spacing_um,
+        }
+
+
+    def load_ome_tiff(self, ome_path):
+        import tifffile
+
+        ome_path = os.fspath(ome_path)
+
+        with tifffile.TiffFile(ome_path) as tf:
+            data = tf.asarray()
+            axes = tf.series[0].axes if tf.series else "YX"
+            info = f"shape={data.shape}  axes={axes}"
+
+        axes = axes.upper()
+
+        for dim in list(axes):
+            if dim not in "CZYX":
+                idx = axes.index(dim)
+                mid = data.shape[idx] // 2
+                data = data.take(mid, axis=idx)
+                axes = axes.replace(dim, "", 1)
+
+        while data.ndim < 2:
+            data = data[np.newaxis]
+            axes = "Y" + axes
+
+        for dim in ["C", "Z"]:
+            if dim not in axes:
+                data = data[np.newaxis]
+                axes = dim + axes
+
+        order = [axes.index(dim) for dim in "CZYX"]
+        data = np.transpose(data, order)
+
+        normed = np.zeros(data.shape, dtype=np.float32)
+        for c in range(data.shape[0]):
+            normed[c] = self._normalize_image(data[c])
+
+        return normed, info
+    
+    def load_ome_tiff_data(self, ome_path):
+        tiff_stack, tiff_info = self.load_ome_tiff(ome_path)
+
+        return {
+            "ome_path": ome_path,
+            "tiff_stack": tiff_stack,
+            "tiff_info": tiff_info,
+        }
 
     def parse_mdoc(self, mdoc_filepath):
         mdoc_path = mdoc_filepath

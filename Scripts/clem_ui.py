@@ -50,6 +50,7 @@ import re
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from clem_correlation import CLEMCorrelator
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -1261,8 +1262,11 @@ class StagePickerWindow(tk.Toplevel):
 
 class RegistrationApp(tk.Tk):
 
-    def __init__(self):
+    def __init__(self, mrc_reader, site_id):
         super().__init__()
+        self.mrc_reader = mrc_reader
+        self.correlator = CLEMCorrelator(mrc_reader=self.mrc_reader)
+        self.site_id = site_id
         self.title("MRC / OME-TIFF Registration Tool")
         self.configure(bg=BG)
         self.minsize(1150, 820)
@@ -1294,6 +1298,66 @@ class RegistrationApp(tk.Tk):
         self._build_styles()
         self._build_ui()
 
+        if self.site_id is not None:
+            self._load_site_data()
+
+    def _display_loaded_site_data(self, data):
+        self._display_loaded_mrc_data(data)
+        self._display_loaded_tiff_data(data)
+
+    def _display_loaded_mrc_data(self, data):
+        self.mrc_file_path = os.fspath(data["mrc_path"])
+        self.mrc_section_map = data["section_pieces"]
+        self.mrc_montage_cache = dict(data["montages"])
+        self.mrc_img_hw = data["img_hw"]
+        self.mrc_feather_px = data["feather_px"]
+        self.mrc_pixel_spacing_um = data["pixel_spacing_um"]
+        self.mrc_is_montage = True
+
+        sections = sorted(self.mrc_section_map.keys())
+        self.mrc_n_sections = len(sections)
+
+        self.mrc_mont_canvas = {
+            sec: (img.shape[1], img.shape[0])
+            for sec, img in self.mrc_montage_cache.items()
+        }
+
+        self.mrc_mont_info = {
+            sec: f"{len(self.mrc_section_map.get(sec, []))} tiles"
+            for sec in sections
+        }
+
+        self.montage_spin.config(to=max(0, self.mrc_n_sections - 1))
+        self.montage_var.set(0)
+        self.montage_count_var.set(f"/ {self.mrc_n_sections} sections")
+
+        self.bc_mrc.reset()
+        self.mrc_info_var.set(os.path.basename(self.mrc_file_path))
+
+        self._show_montage_nav()
+        self._on_montage_changed()
+    
+    def _display_loaded_tiff_data(self, data):
+        self.tiff_stack = data["tiff_stack"]
+        self._tiff_img_dirty = True
+
+        C, Z = self.tiff_stack.shape[:2]
+
+        self.channel_spin.config(to=max(0, C - 1))
+        self.z_spin.config(to=max(0, Z - 1))
+        self.channel_var.set(0)
+        self.z_var.set(0)
+
+        self.flip_x.set(False)
+        self.flip_y.set(False)
+
+        self.bc_tiff_panel.build(C, self._on_bc_tiff)
+        self.tiff_info_var.set(
+            os.path.basename(os.fspath(data["ome_path"])) + "  " + data["tiff_info"]
+        )
+
+        self._draw_tiff()
+
     def _build_styles(self):
         s = ttk.Style(self)
         s.theme_use("clam")
@@ -1302,7 +1366,7 @@ class RegistrationApp(tk.Tk):
                     font=("Segoe UI", 10))
         s.configure("Sm.TLabel",         background=BG, foreground=FG,
                     font=("Segoe UI", 9))
-        s.configure("TButton",           background=ACC, foreground=BG,
+        s.configure("TButton",           babuckground=ACC, foreground=BG,
                     font=("Segoe UI", 10, "bold"), padding=5)
         s.map("TButton", background=[("active",CYA),("disabled",BG3)])
         s.configure("Accent.TButton",    background=ACC2, foreground=BG,
@@ -1332,8 +1396,8 @@ class RegistrationApp(tk.Tk):
         ttk.Button(top, text="Load MRC",
                    command=self._load_mrc).pack(side="left", padx=3)
         ttk.Button(top, text="Load MRC + mdoc",
-                   style="Mont.TButton",
-                   command=self._load_mrc_mdoc).pack(side="left", padx=3)
+           style="Mont.TButton",
+           command=self._load_mrc_mdoc).pack(side="left", padx=3)
         self.mrc_info_var = tk.StringVar(value="No MRC loaded")
         ttk.Label(top, textvariable=self.mrc_info_var,
                   width=40, style="Sm.TLabel").pack(side="left", padx=3)
@@ -1583,6 +1647,10 @@ class RegistrationApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("MRC load error", str(e))
 
+    def _load_site_data(self):
+        data = self.mrc_reader.load_latest_from_site(self.site_id)
+        self._display_loaded_site_data(data)
+
     def _resolve_mrc_path(self, mdoc_path, global_info):
         """Locate the montage MRC for an mdoc, robust to stale Windows paths.
         Tries ImageFile as-written, then its basename next to the mdoc, then
@@ -1613,132 +1681,18 @@ class RegistrationApp(tk.Tk):
                        ("All files", "*")])
 
     def _load_mrc_mdoc(self):
-        # Start from EITHER the .mrc or the .mdoc; the sibling is auto-located.
         path = filedialog.askopenfilename(
-            title="Open MRC montage or SerialEM mdoc (either one)",
-            filetypes=[("MRC or mdoc", ("*.mrc", "*.rec", "*.mrcs", "*.map", "*.mdoc")),
-                       ("MRC", ("*.mrc", "*.rec", "*.mrcs", "*.map")),
-                       ("mdoc", "*.mdoc"), ("All files", "*")])
+            title="Open MRC montage",
+            filetypes=[("MRC", ("*.mrc", "*.rec", "*.mrcs", "*.map")), ("All files", "*"),],)
         if not path:
             return
 
-        ext = os.path.splitext(path)[1].lower()
-        mrc_exts = {".mrc", ".rec", ".mrcs", ".map"}
-
-        if ext == ".mdoc":
-            mdoc_path, mrc_path = path, None
-        elif ext in mrc_exts:
-            mrc_path = path
-            cand = path + ".mdoc"                         # SerialEM: foo.mrc.mdoc
-            if not os.path.isfile(cand):
-                cand = os.path.splitext(path)[0] + ".mdoc"
-            mdoc_path = cand if os.path.isfile(cand) else filedialog.askopenfilename(
-                title="Locate the matching .mdoc",
-                initialdir=os.path.dirname(path),
-                filetypes=[("mdoc", "*.mdoc"), ("All files", "*")])
-            if not mdoc_path:
-                return
-        else:
-            messagebox.showerror("Unknown file type",
-                f"Unrecognised extension '{ext}'.\n"
-                "Pick a .mrc/.rec/.mrcs/.map or a .mdoc file."); return
-
         try:
-            global_info, pieces, mont_sections = parse_mdoc(mdoc_path)
+            data = self.mrc_reader.load_mrc_montage_data(path)
+            self._display_loaded_mrc_data(data)
+            self.status_var.set("MRC montage loaded.")
         except Exception as e:
-            messagebox.showerror("mdoc parse error", str(e)); return
-
-        ps_ang = global_info.get("PixelSpacing", 10000.0)
-        if isinstance(ps_ang, (list, tuple)):
-            ps_ang = float(ps_ang[0])
-        self.mrc_pixel_spacing_um = float(ps_ang) / 10000.0
-
-        if mrc_path is None:
-            mrc_path = self._resolve_mrc_path(mdoc_path, global_info)
-        if not mrc_path:
-            return
-
-        # Cheap header-only shape check: if the mdoc describes many tiles but
-        # the MRC is a single 2-D image (nz <= 1), the auto-located file is
-        # probably the wrong one.  Warn, but still proceed (it is shown as-is).
-        try:
-            with mrcfile.open(mrc_path, mode="r", permissive=True,
-                              header_only=True) as _m:
-                _nz = int(_m.header.nz)
-        except Exception:
-            _nz = None
-        if _nz is not None and _nz <= 1 and len(pieces) > 1:
-            messagebox.showwarning(
-                "MRC may be the wrong file",
-                f"The selected MRC\n  {os.path.basename(mrc_path)}\n"
-                f"has nz={_nz} (a single 2-D image), but the mdoc describes "
-                f"{len(pieces)} tiles.\n\n"
-                "It will be displayed as-is. If this is not the montage you "
-                "expected, the auto-located MRC is probably wrong: re-run "
-                "'Load MRC + mdoc' and pick the tile-stack .mrc yourself.")
-
-        img_size = global_info.get("ImageSize", [4096,4096])
-        if isinstance(img_size, (int,float)):
-            img_w = img_h = int(img_size)
-        else:
-            img_w, img_h = int(img_size[0]), int(img_size[1])
-
-        ps = global_info.get("PieceSpacing", [img_w-410, img_h-410])
-        if isinstance(ps, (int,float)): ps_x = ps_y = int(ps)
-        else: ps_x, ps_y = int(ps[0]), int(ps[1])
-        feather_px = max(1, min(img_w-ps_x, img_h-ps_y))
-
-        mont_canvas = {}
-        for ms in mont_sections:
-            idx = ms["MontSection"]
-            fms = ms.get("FullMontSize", [img_w*3, img_h*3])
-            if isinstance(fms, (int,float)): fms=[int(fms),int(fms)]
-            mont_canvas[idx] = (int(fms[0]), int(fms[1]))
-
-        section_map = {}
-        section_nav = {}
-        for piece in pieces:
-            pc  = piece.get("PieceCoordinates",[0,0,0])
-            sec = int(pc[2]) if isinstance(pc,(list,tuple)) and len(pc)>=3 else 0
-            section_map.setdefault(sec,[]).append(piece)
-            nav_lbl  = piece.get("NavigatorLabel", None)
-            stage_xy = piece.get("StagePosition",[0,0])
-            if isinstance(stage_xy,(list,tuple)) and len(stage_xy)>=2:
-                stage_str = f"{stage_xy[0]:.1f}, {stage_xy[1]:.1f}"
-            else:
-                stage_str = str(stage_xy)
-            if nav_lbl not in (None, "", "?"):
-                section_nav[sec] = f"NavLabel:{nav_lbl}  stage:({stage_str}) um"
-            else:
-                section_nav[sec] = f"stage:({stage_str}) um"
-
-        if not section_map:
-            messagebox.showerror("mdoc error","No [ZValue] sections found."); return
-
-        sorted_secs = sorted(section_map.keys())
-        n_sections  = len(sorted_secs)
-
-        self.mrc_file_path     = mrc_path
-        self.mrc_section_map   = section_map
-        self.mrc_mont_canvas   = mont_canvas
-        self.mrc_mont_info     = section_nav
-        self.mrc_img_hw        = (img_h, img_w)
-        self.mrc_feather_px    = feather_px
-        self.mrc_montage_cache.clear()
-        self.mrc_n_sections    = n_sections
-        self.mrc_is_montage    = True
-
-        self.montage_spin.config(to=n_sections-1)
-        self.montage_var.set(sorted_secs[0])
-        self.montage_count_var.set(f"/ {n_sections}  sections")
-
-        self.bc_mrc.reset()
-        self.mrc_info_var.set(
-            f"{os.path.basename(mrc_path)}  |  {n_sections} montages  "
-            f"({len(pieces)} tiles,  {img_w}x{img_h} px/tile)  "
-            f"|  {self.mrc_pixel_spacing_um:.4f} um/px")
-        self._show_montage_nav()
-        self._on_montage_changed()
+            messagebox.showerror("MRC montage load error", str(e))
 
     def _load_tiff(self):
         path = filedialog.askopenfilename(
@@ -1746,23 +1700,11 @@ class RegistrationApp(tk.Tk):
             filetypes=[("TIFF", ("*.tif", "*.tiff")), ("All files", "*")])
         if not path:
             return
+
         try:
-            stack, info = load_ometiff(path)
-            self.tiff_stack = stack
-            self._tiff_img_dirty = True
-            C, Z = stack.shape[:2]
-            self.channel_spin.config(to=max(0, C - 1))
-            self.z_spin.config(to=max(0, Z - 1))
-            self.channel_var.set(0)
-            self.z_var.set(0)
-            self.flip_x.set(False)
-            self.flip_y.set(False)
-            self.bc_tiff_panel.build(C, self._on_bc_tiff)
-            self.tiff_info_var.set(os.path.basename(path) + "  " + info)
-            self._draw_tiff()
-            self.status_var.set(
-                "OME-TIFF loaded.\n"
-                "Left-click MRC then matching TIFF point to build pairs.")
+            data = self.mrc_reader.load_ome_tiff_data(path)
+            self._display_loaded_tiff_data(data)
+            self.status_var.set("OME-TIFF loaded.")
         except Exception as e:
             messagebox.showerror("TIFF load error", str(e))
 
@@ -2125,47 +2067,56 @@ class RegistrationApp(tk.Tk):
     def _apply_transform(self):
         if self.mrc_image is None or self.tiff_stack is None:
             messagebox.showwarning("Missing data","Load both images first."); return
-        complete = [(p["tiff"],p["mrc"]) for p in self.point_pairs
-                    if "mrc" in p and "tiff" in p]
+        
+        def status_cb(msg): self.status_var.set(msg); self.update_idletasks()
+
         ttype    = self.transform_var.get()
-        required = {"euclidean":2,"similarity":2,"affine":3,"projective":4}.get(ttype,3)
-        if len(complete) < required:
-            messagebox.showwarning("Not enough points",
-                f"{ttype.capitalize()} needs >= {required} pairs (you have {len(complete)})."); return
-        src = np.array([p[0] for p in complete], dtype=float)
-        dst = np.array([p[1] for p in complete], dtype=float)
+
         try:
-            tform = estimate_transform(ttype, src, dst)
+            result = self.correlator.apply_transform(point_pairs=self.point_pairs, transform_type=ttype,
+            tiff_stack=self.tiff_stack, mrc_shape=self.mrc_image.shape, flip_x=bool(self.flip_x.get()), flip_y=bool(self.flip_y.get()),
+            status_cb=status_cb,)
+        except ValueError as e:
+            messagebox.showwarning("Not enough points", str(e))
+            return
         except Exception as e:
-            messagebox.showerror("Transform failed",str(e)); return
+            messagebox.showerror("Transform failed", str(e))
+            return
 
-        # Decompose the fit so the scale/rotation can be sanity-checked: a
-        # too-small/rotated overlay usually means too few or clustered pairs.
-        # 'scale' maps TIFF px -> MRC px, so it should be roughly
-        # (TIFF um/px) / (MRC um/px).  A large residual RMSE (relative to the
-        # montage size) flags mismatched or imprecise correspondences.
-        M = np.asarray(tform.params, dtype=float)
-        import math as _math
-        sx = _math.hypot(M[0, 0], M[1, 0])
-        sy = _math.hypot(M[0, 1], M[1, 1])
-        rot = _math.degrees(_math.atan2(M[1, 0], M[0, 0]))
-        pred = tform(src)
-        rmse = float(np.sqrt(np.mean(np.sum((pred - dst) ** 2, axis=1))))
-        fit_txt = (f"scale x={sx:.4f}, y={sy:.4f}   rot={rot:.2f} deg   "
-                   f"fit RMSE={rmse:.1f} px")
+        self._last_tform = result["transform"]
+        self.warped_channels = result["warped_channels"]
 
-        C, mrc_w, mrc_h = self._warp_channels_with_tform(tform)
-        self.status_var.set(
-            f"{ttype.capitalize()} applied -- {C} ch warped.\n{fit_txt}\n"
-            "Click Show Overlay.")
-        messagebox.showinfo("Done",
-            f"{ttype.capitalize()} from {len(complete)} pairs.\n"
-            f"{C} ch warped to grid ({mrc_w} x {mrc_h}).\n\n"
-            f"{fit_txt}\n\n"
-            f"(scale ~ TIFF_um_per_px / MRC_um_per_px; MRC = "
-            f"{self.mrc_pixel_spacing_um:.4f} um/px.  If scale looks wrong or "
-            f"RMSE is large, add more corner-spread pairs.)\n\n"
-            "Click Show Overlay.")
+        C = len(self.warped_channels)
+        mrc_h, mrc_w = self.mrc_image.shape
+        fit_txt = result["fit_info"]["text"]
+        n_pairs = result["n_pairs"]
+
+
+        self.status_var.set("{ttype.capitalize()} applied -- {C} ch warped.\n"
+                        f"{fit_txt}\nClick Show Overlay.")
+        
+
+        msg = (
+                    f"{ttype.capitalize()} from {n_pairs} pairs.\n"
+                    f"{C} ch warped to grid ({mrc_w} x {mrc_h}).\n\n"
+                    f"{fit_txt}\n\n"
+                    f"(scale ~ TIFF_um_per_px / MRC_um_per_px; MRC = {self.mrc_pixel_spacing_um:.4f} um/px. "
+                    f"If scale looks wrong or RMSE is large, add more corner-spread pairs.)\n\n"
+                    "Click Show Overlay."
+                )
+        
+        if "scale_check" in result:
+            scale_check = result["scale_check"]
+
+            if scale_check["ok"]:
+                msg += ("\n\nScale check passed:\n"
+                    f"{scale_check['message']}")
+            else:
+                msg += ("\n\nWARNING: scale check failed:\n"
+                    f"{scale_check['message']}\n"
+                    "This may indicate mismatched landmarks or an incorrect pixel size.")
+            
+        messagebox.showinfo("Done", msg)
 
     def _warp_channels_with_tform(self, tform):
         """Warp every channel (max-projected over z) onto the MRC grid using

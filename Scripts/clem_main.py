@@ -12,11 +12,11 @@ SAMPLE_TYPE = 'airyscan'
 FILENAME = "lamella-1-mmm-test-5x5-6500.mrc"
 
 if __name__ == "__main__":
-    mrc = MRCReader(coord_key="AlignedPieceCoordsVS", refine_alignment=True, section=0)
+    mrc = MRCReader(coord_key="AlignedPieceCoordsVS", path=PATH, refine_alignment=True, section=0)
 
     temcom = TEMComm(rotation="rotation", mrc_reader=mrc, path=PATH, offline=True)
 
-    exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, path=PATH, sample_type=SAMPLE_TYPE)
+    exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, sample_type=SAMPLE_TYPE)
 
     #exc.run_experiment_setup()
     #exc.run_acquire_position_montages()
