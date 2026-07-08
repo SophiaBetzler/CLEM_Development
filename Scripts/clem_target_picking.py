@@ -274,7 +274,7 @@ class CLEMPicker:
                 cpy = float(np.mean([p["py"] for p in grp]))
         else:
             off_px = lone_offset_um / self.pix_um            # um -> montage pixels
-            min_sep_px = min_target_sep_um / self.pix_um     # required clearance, pixels
+            min_sep_px = min_target_step_um / self.pix_um     # required clearance, pixels
             lone = grp[0]
 
             # direction toward the centroid of all OTHER picks (pixel space)
@@ -364,39 +364,41 @@ class CLEMPicker:
     # ------------------------------------------------------------------ #
     
     def run_auto_picker(self):
-        self.picker()
-        os.makedirs(os.path.join(self.path, self.position), exist_ok=True)
-        self.tem.add_stage_pos_to_nav(picks=self.picks)
-        groups = self.group_picks(radius_um=5.0)
+        picks = self.picker()
+        for pick in picks:
+            self.tem.add_nav_items(pick)
+        # os.makedirs(os.path.join(self.path, self.position), exist_ok=True)
+        # self.tem.add_stage_pos_to_nav(picks=self.picks)
+        # groups = self.group_picks(radius_um=5.0)
 
-        for g_i, group in enumerate(groups):
-            user_name = f"{self.position}_area{g_i+1}"
-            center = group["tracking"]
-            center["pick_id"] = f"{user_name}_track"
-            self._get_cropped_image_target_from_lmm(center, (10, 10)) 
-            center_summary = self._align_target_at_higher_mag(pick_id=center["pick_id"], target_stage_pos=(center["stage"][0], center["stage"][1], center["stage_z"]), mode="View", eucentric=True)
-            img_crop, img_crop_flipped = self._get_cropped_image_target_from_preset(center, (2, 2))
-            center_summary_high_mag = self._align_target_at_higher_mag(pick_id=f"{center['pick_id']}_2", target_stage_pos=(center['stage'][0], pick['stage'][1], pick['stage_z']), presets=center_summary, mode='Record', eucentric=False)
-            center.update(center_summary_high_mag)
-            self.tem.acquire_image(mode='View', )
+        # for g_i, group in enumerate(groups):
+        #     user_name = f"{self.position}_area{g_i+1}"
+        #     center = group["tracking"]
+        #     center["pick_id"] = f"{user_name}_track"
+        #     self._get_cropped_image_target_from_lmm(center, (10, 10)) 
+        #     center_summary = self._align_target_at_higher_mag(pick_id=center["pick_id"], target_stage_pos=(center["stage"][0], center["stage"][1], center["stage_z"]), mode="View", eucentric=True)
+        #     img_crop, img_crop_flipped = self._get_cropped_image_target_from_preset(center, (2, 2))
+        #     center_summary_high_mag = self._align_target_at_higher_mag(pick_id=f"{center['pick_id']}_2", target_stage_pos=(center['stage'][0], pick['stage'][1], pick['stage_z']), presets=center_summary, mode='Record', eucentric=False)
+        #     center.update(center_summary_high_mag)
+        #     self.tem.acquire_image(mode='View', )
 
-        for pick in group['picks']:
-            img_crop, img_crop_flipped = self._get_cropped_image_target_from_lmm(pick, (10, 10))
-            pick_summary = self._align_target_at_higher_mag(pick_id=pick['pick_id'], target_stage_pos=(pick['stage'][0], pick['stage'][1], pick['stage_z']), mode='View', eucentric=True)
-            img_crop, img_crop_flipped = self._get_cropped_image_target_from_preset(pick, (2, 2))
-            pick_summary_high_mag = self._align_target_at_higher_mag(pick_id=f"{pick['pick_id']}_2", target_stage_pos=(pick['stage'][0], pick['stage'][1], pick['stage_z']), presets=pick_summary, mode='Record', eucentric=False)
-            pick.update(pick_summary_high_mag)
+        # for pick in group['picks']:
+        #     img_crop, img_crop_flipped = self._get_cropped_image_target_from_lmm(pick, (10, 10))
+        #     pick_summary = self._align_target_at_higher_mag(pick_id=pick['pick_id'], target_stage_pos=(pick['stage'][0], pick['stage'][1], pick['stage_z']), mode='View', eucentric=True)
+        #     img_crop, img_crop_flipped = self._get_cropped_image_target_from_preset(pick, (2, 2))
+        #     pick_summary_high_mag = self._align_target_at_higher_mag(pick_id=f"{pick['pick_id']}_2", target_stage_pos=(pick['stage'][0], pick['stage'][1], pick['stage_z']), presets=pick_summary, mode='Record', eucentric=False)
+        #     pick.update(pick_summary_high_mag)
 
-            ref_dir = os.path.join(self.path, "targets")
-            os.makedirs(ref_dir, exist_ok=True)
+        #     ref_dir = os.path.join(self.path, "targets")
+        #     os.makedirs(ref_dir, exist_ok=True)
 
-            self.tem.acquire(mode='View', lowdose=True, save=True, position=None, token=pick['pick_id'])
-            self.tem.acquire(mode='Record', lowdose=True, save=True, position=None, token=pick['pick_id'])
+        #     self.tem.acquire(mode='View', lowdose=True, save=True, position=None, token=pick['pick_id'])
+        #     self.tem.acquire(mode='Record', lowdose=True, save=True, position=None, token=pick['pick_id'])
 
          
 
 
-        self.write_pacetomo_group()
+        # self.write_pacetomo_group()
         
 
     def picker(self):
@@ -433,9 +435,4 @@ class CLEMPicker:
         plt.show()
         return self.picks
 
-
-if __name__ == "__main__":
-
-    PATH = "C:\\Users\\CZII\\Desktop\\Test_Data\\"
-    FILENAME = "12-chief-dog_montage_20260616-07-47-11.mrc"
 
