@@ -134,4 +134,287 @@ class ExecutiveControls:
 
      
         
-        
+"""
+clem_site_data.py
+=================
+One unified data container per site_id.
+
+Instead of passing around separate dicts from load_mrc_montage_data(),
+load_ome_tiff_data(), build_montage_summary(), the correlator, and the CSV
+rows, everything for a single site lives in one SiteData object:
+
+    site = SiteData(site_id="lamella-1", path=r"C:\\...\\lamella-1")
+    site.load_mrc(mrc_reader, mrc_filepath)
+    site.load_tiff(mrc_reader, tiff_filepath)
+    site.set_registration(correlator_result)      # dict from CLEMCorrelator
+    site.set_acquisition_from_csv_row(csv_row)     # a row from _import_csv_file
+    site.save()                                    # -> lamella-1/lamella-1.pkl
+    site = SiteData.load(r"C:\\...\\lamella-1\\lamella-1.pkl")
+
+The big arrays (montage image, warped channels, tiff stack) are held in
+memory on the object and pickled along with everything else, so one .pkl
+per site is fully self-contained.
+
+Sub-sections are plain dicts with documented, scheme-consistent keys
+(snake_case + unit suffixes). See the schema comments on each loader.
+"""
+
+from __future__ import annotations
+
+import os
+import pickle
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+import numpy as np
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def _coords_to_dict(value, x_key, y_key):
+    """Normalise a coordinate that may be a (x, y) tuple/list, an already-built
+    dict, or None into a dict with the given keys (or None).
+
+    This keeps SiteData working whether or not you've refactored the reader's
+    _px() / _stage_xy() helpers to return dicts yet.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return {x_key: float(value[0]), y_key: float(value[1])}
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# The container
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class SiteDataSummary:
+    site_id: str
+    path: str
+    mrc: Optional[dict] = None
+    tiff: Optional[dict] = None
+    registration: Optional[dict] = None
+    acquisition: Optional[dict] = None
+    picks: list = field(default_factory=list)
+
+    # ======================================================================= #
+    # MRC (TEM reference montage)
+    # ======================================================================= #
+    def load_mrc(self, mrc_reader, mrc_filepath):
+        """Populate self.mrc from an MRCReader that has already parsed the
+        montage (i.e. after run_montage_loader_and_create_summary or
+        load_mrc_montage has run for this section).
+
+        self.mrc schema:
+            mrc_path                : str
+            image                   : np.ndarray (assembled montage) | None
+            image_height_width      : (h, w) in pixels
+            pixel_spacing_um        : float  (physical size per pixel)
+            feather_pixels          : int
+            section                 : int
+            alignment               : str
+            rotation_deg            : float
+            min_x_pixels            : int | None
+            min_y_pixels            : int | None
+            tiles                   : list[dict]   (see tile schema below)
+            stage_fit               : dict | None  (from reader's pixel->stage fit)
+            stage_matrix            : np.ndarray | None
+
+        tile schema:
+            z_index                 : int
+            stage_z_um              : float | None
+            pixel_coordinates_um    : {"x_um", "y_um"} | None
+            stage_xy_um             : {"stage_x_um", "stage_y_um"} | None
+        """
+        summary = mrc_reader.build_montage_summary(mrc_filepath=mrc_filepath)
+
+        # build_montage_summary may already return a nested {"mrc": {...}} form
+        # if you refactor it; support both the current flat form and that.
+        src = summary.get("mrc", summary)
+
+        tiles = []
+        for t in src.get("tiles", []):
+            tiles.append({
+                "z_index": t.get("z_index", t.get("z")),
+                "stage_z_um": t.get("stage_z_um", t.get("stage_z")),
+                "pixel_coordinates_um": _coords_to_dict(
+                    t.get("pixel_coordinates_um", t.get("px")),
+                    "x_um", "y_um"),
+                "stage_xy_um": _coords_to_dict(
+                    t.get("stage_xy_um", t.get("stage")),
+                    "stage_x_um", "stage_y_um"),
+            })
+
+        self.mrc = {
+            "mrc_path": os.fspath(mrc_filepath),
+            "image": src.get("image"),
+            "image_height_width": src.get("mrc_image_height_width",
+                                          src.get("img_hw")),
+            "pixel_spacing_um": src.get("pixel_spacing_um"),
+            "feather_pixels": src.get("feather_pixels",
+                                      getattr(mrc_reader, "_feather_px", None)),
+            "section": src.get("section"),
+            "alignment": src.get("alignment"),
+            "rotation_deg": src.get("rotation_deg"),
+            "min_x_pixels": src.get("min_x_pixels", src.get("min_x")),
+            "min_y_pixels": src.get("min_y_pixels", src.get("min_y")),
+            "tiles": tiles,
+            "stage_fit": src.get("stage_fit"),
+            "stage_matrix": src.get("stage_matrix"),
+        }
+        return self
+
+    # ======================================================================= #
+    # TIFF (fluorescence channels)
+    # ======================================================================= #
+    def load_tiff(self, mrc_reader, tiff_filepath):
+        """Populate self.tiff using the reader's load_ome_tiff().
+
+        self.tiff schema:
+            ome_path                : str
+            stack_czyx              : np.ndarray  (Channels, Z, Y, X)
+            num_channels            : int
+            num_z_slices            : int
+            stack_height_width      : (y, x) in pixels
+            info                    : str
+        """
+        stack_czyx, info = mrc_reader.load_ome_tiff(tiff_filepath)
+        c, z, y, x = stack_czyx.shape
+        self.tiff = {
+            "ome_path": os.fspath(tiff_filepath),
+            "stack_czyx": stack_czyx,
+            "num_channels": int(c),
+            "num_z_slices": int(z),
+            "stack_height_width": (int(y), int(x)),
+            "info": info,
+        }
+        return self
+
+    # ======================================================================= #
+    # Registration (TIFF -> MRC transform + warped channels)
+    # ======================================================================= #
+    def set_registration(self, correlator_result, transform_type=None,
+                          flip_x=False, flip_y=False):
+        """Store the result dict returned by CLEMCorrelator.apply_transform().
+
+        self.registration schema:
+            transform_type          : str
+            transform_matrix        : np.ndarray (3x3) | skimage transform
+            fit_info                : dict   (scale_x, scale_y, rotation_deg, rmse_px)
+            num_point_pairs         : int
+            flip_x, flip_y          : bool
+            warped_channels         : list[np.ndarray]  (each in MRC grid space)
+        """
+        r = correlator_result
+        self.registration = {
+            "transform_type": transform_type or r.get("transform_type"),
+            "transform_matrix": r.get("transform"),
+            "fit_info": r.get("fit_info"),
+            "num_point_pairs": r.get("n_pairs"),
+            "flip_x": bool(flip_x),
+            "flip_y": bool(flip_y),
+            "warped_channels": r.get("warped_channels"),
+        }
+        return self
+
+    # ======================================================================= #
+    # Acquisition (stage position / tilt for this site)
+    # ======================================================================= #
+    def set_acquisition_from_csv_row(self, row):
+        """Fill self.acquisition from a site row produced by
+        ExecutiveControls._import_csv_file().
+
+        self.acquisition schema:
+            stage_x_um, stage_y_um, stage_z_um : float | None
+            stage_tilt                         : float | None
+        """
+        self.acquisition = {
+            "stage_x_um": row.get("stage_x_um"),
+            "stage_y_um": row.get("stage_y_um"),
+            "stage_z_um": row.get("stage_z_um"),
+            "stage_tilt": row.get("stage_tilt"),
+        }
+        return self
+
+    # ======================================================================= #
+    # Picks (target positions)
+    # ======================================================================= #
+    def add_pick(self, pick_id, pixel_xy_um=None, stage_xy_um=None,
+                 stage_z_um=None, notes=None):
+        """Append one pick. Coordinates are dicts to match the scheme:
+            pixel_xy_um : {"x_um", "y_um"}
+            stage_xy_um : {"stage_x_um", "stage_y_um"}
+        """
+        self.picks.append({
+            "pick_id": pick_id,
+            "pixel_coordinates_um": _coords_to_dict(pixel_xy_um, "x_um", "y_um"),
+            "stage_xy_um": _coords_to_dict(stage_xy_um,
+                                           "stage_x_um", "stage_y_um"),
+            "stage_z_um": stage_z_um,
+            "notes": notes,
+        })
+        return self
+
+    # ======================================================================= #
+    # Convenience accessors (avoid deep-dict typos at call sites)
+    # ======================================================================= #
+    @property
+    def pixel_spacing_um(self):
+        return self.mrc["pixel_spacing_um"] if self.mrc else None
+
+    @property
+    def montage_image(self):
+        return self.mrc["image"] if self.mrc else None
+
+    @property
+    def warped_channels(self):
+        return self.registration["warped_channels"] if self.registration else None
+
+    def validate(self):
+        """Light sanity checks. Raises ValueError on clear inconsistencies;
+        returns a list of non-fatal warnings."""
+        warnings = []
+        if self.mrc and self.mrc.get("pixel_spacing_um") in (None, 0):
+            warnings.append("mrc.pixel_spacing_um is missing or zero.")
+        if self.tiff and self.registration:
+            n_ch = self.tiff["num_channels"]
+            warped = self.registration.get("warped_channels") or []
+            if warped and len(warped) != n_ch:
+                warnings.append(
+                    f"warped_channels ({len(warped)}) != num_channels ({n_ch}).")
+        return warnings
+
+    # ======================================================================= #
+    # Persistence  (single pickle file per site)
+    # ======================================================================= #
+    def default_pickle_path(self):
+        return os.path.join(self.path, f"{self.site_id}.pkl")
+
+    def save(self, pickle_path=None):
+        """Pickle the whole object (arrays included) to one file."""
+        pickle_path = pickle_path or self.default_pickle_path()
+        os.makedirs(os.path.dirname(pickle_path), exist_ok=True)
+        with open(pickle_path, "wb") as fh:
+            pickle.dump(self, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        return pickle_path
+
+    @classmethod
+    def load(cls, pickle_path):
+        with open(pickle_path, "rb") as fh:
+            obj = pickle.load(fh)
+        if not isinstance(obj, cls):
+            raise TypeError(f"{pickle_path} did not contain a SiteData object.")
+        return obj
+
+    def __repr__(self):
+        stages = [name for name in ("mrc", "tiff", "registration", "acquisition")
+                  if getattr(self, name) is not None]
+        return (f"SiteData(site_id={self.site_id!r}, "
+                f"loaded={stages}, n_picks={len(self.picks)})")
