@@ -1,6 +1,17 @@
 import os
 import csv
 from pathlib import Path
+        
+from __future__ import annotations
+
+import os
+import pickle
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+import numpy as np
+
+
 
 class ExecutiveControls:
 
@@ -133,66 +144,7 @@ class ExecutiveControls:
         #     target_picker.run_auto_picker()
 
      
-        
-"""
-clem_site_data.py
-=================
-One unified data container per site_id.
 
-Instead of passing around separate dicts from load_mrc_montage_data(),
-load_ome_tiff_data(), build_montage_summary(), the correlator, and the CSV
-rows, everything for a single site lives in one SiteData object:
-
-    site = SiteData(site_id="lamella-1", path=r"C:\\...\\lamella-1")
-    site.load_mrc(mrc_reader, mrc_filepath)
-    site.load_tiff(mrc_reader, tiff_filepath)
-    site.set_registration(correlator_result)      # dict from CLEMCorrelator
-    site.set_acquisition_from_csv_row(csv_row)     # a row from _import_csv_file
-    site.save()                                    # -> lamella-1/lamella-1.pkl
-    site = SiteData.load(r"C:\\...\\lamella-1\\lamella-1.pkl")
-
-The big arrays (montage image, warped channels, tiff stack) are held in
-memory on the object and pickled along with everything else, so one .pkl
-per site is fully self-contained.
-
-Sub-sections are plain dicts with documented, scheme-consistent keys
-(snake_case + unit suffixes). See the schema comments on each loader.
-"""
-
-from __future__ import annotations
-
-import os
-import pickle
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Optional
-
-import numpy as np
-
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
-def _coords_to_dict(value, x_key, y_key):
-    """Normalise a coordinate that may be a (x, y) tuple/list, an already-built
-    dict, or None into a dict with the given keys (or None).
-
-    This keeps SiteData working whether or not you've refactored the reader's
-    _px() / _stage_xy() helpers to return dicts yet.
-    """
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, (list, tuple)) and len(value) >= 2:
-        return {x_key: float(value[0]), y_key: float(value[1])}
-    return None
-
-
-# --------------------------------------------------------------------------- #
-# The container
-# --------------------------------------------------------------------------- #
 
 @dataclass
 class SiteDataSummary:
@@ -207,36 +159,10 @@ class SiteDataSummary:
     # ======================================================================= #
     # MRC (TEM reference montage)
     # ======================================================================= #
-    def load_mrc(self, mrc_reader, mrc_filepath):
-        """Populate self.mrc from an MRCReader that has already parsed the
-        montage (i.e. after run_montage_loader_and_create_summary or
-        load_mrc_montage has run for this section).
 
-        self.mrc schema:
-            mrc_path                : str
-            image                   : np.ndarray (assembled montage) | None
-            image_height_width      : (h, w) in pixels
-            pixel_spacing_um        : float  (physical size per pixel)
-            feather_pixels          : int
-            section                 : int
-            alignment               : str
-            rotation_deg            : float
-            min_x_pixels            : int | None
-            min_y_pixels            : int | None
-            tiles                   : list[dict]   (see tile schema below)
-            stage_fit               : dict | None  (from reader's pixel->stage fit)
-            stage_matrix            : np.ndarray | None
-
-        tile schema:
-            z_index                 : int
-            stage_z_um              : float | None
-            pixel_coordinates_um    : {"x_um", "y_um"} | None
-            stage_xy_um             : {"stage_x_um", "stage_y_um"} | None
-        """
+    def load_mrc_data_summary(self, mrc_reader, mrc_filepath):
         summary = mrc_reader.build_montage_summary(mrc_filepath=mrc_filepath)
 
-        # build_montage_summary may already return a nested {"mrc": {...}} form
-        # if you refactor it; support both the current flat form and that.
         src = summary.get("mrc", summary)
 
         tiles = []
@@ -255,17 +181,15 @@ class SiteDataSummary:
         self.mrc = {
             "mrc_path": os.fspath(mrc_filepath),
             "image": src.get("image"),
-            "image_height_width": src.get("mrc_image_height_width",
-                                          src.get("img_hw")),
+            "image_height_width": src.get("mrc_image_height_width"),
             "pixel_spacing_um": src.get("pixel_spacing_um"),
-            "feather_pixels": src.get("feather_pixels",
-                                      getattr(mrc_reader, "_feather_px", None)),
+            "feather_pixels": src.get("feather_pixels", getattr(mrc_reader, "_feather_px", None)),
             "section": src.get("section"),
             "alignment": src.get("alignment"),
             "rotation_deg": src.get("rotation_deg"),
-            "min_x_pixels": src.get("min_x_pixels", src.get("min_x")),
-            "min_y_pixels": src.get("min_y_pixels", src.get("min_y")),
-            "tiles": tiles,
+            "min_x_pixels": src.get("min_x_pixels"),
+            "min_y_pixels": src.get("min_y_pixels"),
+            "tiles": src.get("tiles"),
             "stage_fit": src.get("stage_fit"),
             "stage_matrix": src.get("stage_matrix"),
         }
@@ -274,7 +198,7 @@ class SiteDataSummary:
     # ======================================================================= #
     # TIFF (fluorescence channels)
     # ======================================================================= #
-    def load_tiff(self, mrc_reader, tiff_filepath):
+    def load_tiff_data_summary(self, mrc_reader, tiff_filepath):
         """Populate self.tiff using the reader's load_ome_tiff().
 
         self.tiff schema:
