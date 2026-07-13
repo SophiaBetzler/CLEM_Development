@@ -28,7 +28,6 @@ class TEMComm:
             print("[INFO] SerialEM is running in offline mode. No commands will be sent to the microscope.")
    
 
-
     # ---------------------------------------------------------------------------
     # control image acquisition and navigator handling
     # ---------------------------------------------------------------------------
@@ -84,11 +83,27 @@ class TEMComm:
         sem.Save()                 
         sem.CloseFile()
 
-    def _readout_image_properties(self, mode, imaging_state=None):
+    def get_image_properties(self, mode, imaging_state=None):
         self.prepare_imaging_state(mode=mode,imaging_state=imaging_state)
         self.ACQUIRE[mode]()
         image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = sem.ImageProperties("A")
-        return image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set
+        magnification, *_ = self.sem.ReportMag()
+        return {
+                'img_width_px': int(image_x_pxl),
+                'img_height_px': int(image_y_pxl),
+                'pixel_size_um': pxl_size_nm/1000,
+                'magnification': magnification,
+                }
+    
+    def get_low_dose_mode_properties(self, mode):
+        if self.offline:
+            return{'mode': mode, 'magnification': 2000, 'pixel_size_um': 0.007}
+        
+        sem.GoToLowDoseArea(mode)
+        sem.Delay(1, 'sec')
+        magnification = int(self.sem.ReportMag()[0])
+        return magnification
+
 
     def acquire_image(self, mode, imaging_state=None, save=False, site_id=None, label=None):
         self.prepare_imaging_state(mode=mode, imaging_state=imaging_state,)
@@ -202,6 +217,7 @@ class TEMComm:
             sem.Delay(1, 'sec')
             sem.MoveStage(backlashXY, backlashXY, 0.0)
 
+
     # ---------------------------------------------------------------------------
     # Montage control
     # ---------------------------------------------------------------------------
@@ -210,8 +226,7 @@ class TEMComm:
         
         self.prepare_imaging_state(mode="View", imaging_state=imaging_state)
         
-        self.precise_stage_move(stage_tilt=stage_tilt)
-        self.set_eucentricity(level='rough')
+        self.set_eucentricity(level='rough_fine')
 
         image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = self._readout_image_properties(mode="View")
 
@@ -235,7 +250,8 @@ class TEMComm:
             os.makedirs(os.path.join(self.output_root, site_id), exist_ok=True)
         else:
             filepath = os.path.join(self.output_root, 'Montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
-        
+
+        self.precise_stage_move(stage_tilt=stage_tilt)
         sem.OpenNewMontage(nx, ny, filepath)
         sem.SetMontageParams(int(1),    # useStage = 1 (stage montage, required for hybrid usage of both image shift and stage shift)
                         overlap_pxl_x,    # overlap in x in pxl
@@ -268,10 +284,10 @@ class TEMComm:
             debug = int(0)
 
         if mag_compensation is True:
-            sem.AlignBetweenMags(buffer, -1, -1, -1, 0, -1, int(0)) # buffer, center X in the reference, center Y in the reference, max allowed shift (negative means field of view, positive microns), scale (default: 4%), rotation (default: 3 degrees), avoid_image_shift
+            self.sem.AlignBetweenMags(buffer, -1, -1, -1, 0, -1, int(0)) # buffer, center X in the reference, center Y in the reference, max allowed shift (negative means field of view, positive microns), scale (default: 4%), rotation (default: 3 degrees), avoid_image_shift
             self._save_buffer_image(site_id=site_id, acquisition_type='mag_adjusted_image', label=pick_id)
             buffer = "Q"
-            sem.Copy("B", buffer) 
+            self.sem.Copy("B", buffer) 
 
         max_iter = 5
         iteration = 0

@@ -4,7 +4,7 @@ import os
 import mrcfile
 import numpy as np
 from pathlib import Path
-
+from clem_dataclasses import *
 
 class MRCReader:
 
@@ -24,8 +24,6 @@ class MRCReader:
         self.montages       = {}            # {section: assembled array}
         self.section_pieces = {}            # {section: [tile dicts]}
         self.pixel_spacing_um = None
-        self.mrc_image_hw = None
-        self._feather_pixels = None
         self._global_info = None
 
     # ------------------------------------------------------------------ #
@@ -45,7 +43,7 @@ class MRCReader:
         c = piece.get(field)
         if c is None:
             return None
-        return {"pick_x_um": float(c[0]), "pick_y_um": float(c[1])}
+        return {"piece_x_um": float(c[0]), "piece_y_um": float(c[1])}
     
     @staticmethod
     def _piece_stage_xy_position(piece):
@@ -57,19 +55,17 @@ class MRCReader:
     def _piece_stage_z_position(self, piece):
         stage_position = piece.get("StagePosition")
         if isinstance(stage_position, (list, tuple)) and len(stage_position) >= 3:
-            return {"stage_z_um": float(stage_position[2])}
-        
+            return float(stage_position[2])
         for k in ("StageZ", "Z"):
             v = piece.get(k)
             if v is not None:
-                return {"stage_z_um": float(v[0] if isinstance(v, (list, tuple)) else v)}
-            
+                return float(v[0] if isinstance(v, (list, tuple)) else v)
         global_info = self._global_info
         if global_info:
             for k in ("StageZ", "Z"):
                 v = global_info.get(k)
                 if v is not None:
-                    return {"stage_z_um": float(v[0] if isinstance(v, (list, tuple)) else v)}
+                    return float(v[0] if isinstance(v, (list, tuple)) else v)
         return None
 
     def _section_rotation_angle(self, pieces):
@@ -188,7 +184,7 @@ class MRCReader:
                 f"coord_key must be one of {self.COORD_KEYS}, got {self.coord_key!r}")
         if not pieces:
             raise ValueError(
-                "No tiles were parsed from the mdoc (0 [ZValue] blocks). "
+                "No edited pieces were parsed from the mdoc (0 [ZValue] blocks). "
                 "The montage cannot be built - check the mdoc contents.")
         missing = [p.get("ZValue") for p in pieces
                    if p.get(self.coord_key) is None]
@@ -209,7 +205,7 @@ class MRCReader:
             sec = int(pc[2]) if isinstance(pc, (list, tuple)) and len(pc) >= 3 else 0
             section_map.setdefault(sec, []).append(piece)
         if not section_map:
-            raise ValueError("No [ZValue] tiles found in the mdoc.")
+            raise ValueError("No [ZValue] edited pieces found in the mdoc.")
         self.section_pieces = section_map
         return section_map
 
@@ -235,25 +231,25 @@ class MRCReader:
     # Loaders
     # ------------------------------------------------------------------ #
 
-    
     def load_latest_from_site(self, site_id):
-
         mrc_path = self._find_latest_montage_mrc(site_id)
         ome_path = self._find_latest_ome_tiff(site_id)
+        site_data_summary = SiteDataSummary(site_id=site_id, path=str(self._get_site_folder(site_id)))
+        self.load_mrc_into_data_class(site_data_summary, mrc_path)
+        self.load_tiff_into_data_class(site_data_summary, ome_path)
+        return site_data_summary
+    
+    def load_mrc_into_data_class(self, site_data, mrc_path):
+        self.load_mrc_montage(mrc_path)                 # reader state: montages, section_pieces, _img_hw...
+        site_data.populate_mrc(self, mrc_path)          # overwrites .mrc
+        # swapping the montage invalidates any TIFF->MRC registration:
+        site_data.registration = None
+        return site_data
 
-        mrc_data = self.load_mrc_montage_data(mrc_path)
-        tiff_data = self.load_ome_tiff_data(ome_path)
-
-        data = {
-            "site_id": site_id,
-            "folder": self._get_site_folder(site_id),
-            **mrc_data,
-            **tiff_data,
-        }
-
-        self.current_data = data
-        return data
-
+    def load_tiff_into_data_class(self, site_data, ome_path):
+        site_data.populate_tiff(self, ome_path)         # overwrites .tiff
+        site_data.registration = None
+        return site_data
 
     def load_mrc_single(self, mrc_filepath=None):
         if mrc_filepath is None:
@@ -310,7 +306,7 @@ class MRCReader:
         for sec in sorted(self.section_pieces):
             self.section = sec
             print(f"[INFO] Assembling section {sec}: "
-                  f"{len(self.section_pieces[sec])} tiles")
+                  f"{len(self.section_pieces[sec])} edited pieces")
             montage, min_x, min_y = self._assemble_montage(mrc_filepath, img_h, img_w, feather_px, self.coord_key)
             self.montages[sec] = montage
         self.section = saved_section
@@ -407,7 +403,7 @@ class MRCReader:
             for key in self.COORD_KEYS:
                 piece.setdefault(key, None)
 
-        print(f"[INFO] Parsed {len(pieces)} tiles, {len(mont_sections)} mont section(s).")
+        print(f"[INFO] Parsed {len(pieces)} edited pieces, {len(mont_sections)} mont section(s).")
         return global_info, pieces, mont_sections
 
     # ------------------------------------------------------------------ #
@@ -442,15 +438,15 @@ class MRCReader:
             if data.ndim != 3:
                 raise ValueError(f"Unsupported MRC shape {data.shape}")
             n_frames = data.shape[0]
-            tiles = {z: data[z].astype(np.float64)
+            pieces_edited = {z: data[z].astype(np.float64)
                      for z in z_indices if z < n_frames}
 
         for piece, x, y in coords:
             z = piece["ZValue"]
-            if z not in tiles:
+            if z not in pieces_edited:
                 continue
             dx = int(round(x - min_x)); dy = int(round(y - min_y))
-            canvas[dy:dy + img_h, dx:dx + img_w] += tiles[z] * wmap
+            canvas[dy:dy + img_h, dx:dx + img_w] += pieces_edited[z] * wmap
             weights[dy:dy + img_h, dx:dx + img_w] += wmap
 
         valid = weights > 0
@@ -461,25 +457,21 @@ class MRCReader:
     # Determine stage rotation vs montage
     # ------------------------------------------------------------------ #
 
-    def _fit_pixel_to_stage_rotation_matrix(self, pieces):
-        pts = [(p["px"], p["stage"]) for p in pieces if p.get("px") is not None and p.get("stage") is not None]
-
-        if len(pts) <3:
+    def _fit_pixel_to_stage_rotation_matrix(self, pieces_edited):
+        pts = [t for t in tiles if t.pixel_x_um is not None and t.stage_x_um is not None]
+        if len(pts) < 3:
             return None, {"n": len(pts), "message": "Not enough points to fit rotation."}
-        
-        P = np.array([[p[0], p[1]] for p, _ in pts], float)
-        S = np.array([[s[0], s[1]] for _, s in pts], float)
+        P = np.array([[t.pixel_x_um, t.pixel_y_um] for t in pts], float)
+        S = np.array([[t.stage_x_um, t.stage_y_um] for t in pts], float)
         A = np.hstack([P, np.ones((len(P), 1), float)])
         sol, *_ = np.linalg.lstsq(A, S, rcond=None)
         M, t = sol[:2].T, sol[2]
-
         residuals = np.hypot(*(P @ M.T + t - S).T)
-        info = {"number_pieces": len(pts),
-                "determinant": float(np.linalg.det(M)),
+        info = {"n": len(pts),
+                "det": float(np.linalg.det(M)),
                 "angle_deg": float(np.degrees(np.arctan2(M[1, 0], M[0, 0]))),
                 "rms_um": float(np.sqrt(np.mean(residuals ** 2))),
-                "max_um": float(residuals.max()),}
-        
+                "max_um": float(residuals.max())}
         return M, info
         
 
@@ -520,7 +512,7 @@ class MRCReader:
                 print("[refine] MRC is a single 2-D image - cannot refine.")
                 return pieces
             n_frames = mrc.data.shape[0]
-            tiles = {p["ZValue"]: mrc.data[p["ZValue"]].astype(np.float32) for p in pieces if p["ZValue"] < n_frames}
+            pieces_edited = {p["ZValue"]: mrc.data[p["ZValue"]].astype(np.float32) for p in pieces if p["ZValue"] < n_frames}
 
         z_list = [p["ZValue"] for p in pieces]
         z2idx = {z: i for i, z in enumerate(z_list)}
@@ -532,20 +524,20 @@ class MRCReader:
         A_rows, b_rows, n_pairs = [], [], 0
         for (gx, gy), p_ref in sorted(grid.items()):
             zr = p_ref["ZValue"]
-            if zr not in tiles:
+            if zr not in pieces_edited:
                 continue
             for direction, (dgx, dgy) in [("R", (1, 0)), ("D", (0, 1))]:
                 nbr = (gx + dgx, gy + dgy)
                 if nbr not in grid:
                     continue
                 zm = grid[nbr]["ZValue"]
-                if zm not in tiles:
+                if zm not in pieces_edited:
                     continue
                 n_pairs += 1
                 if direction == "R":
-                    ref_strip, mov_strip = tiles[zr][:, -overlap:], tiles[zm][:, :overlap]
+                    ref_strip, mov_strip = pieces_edited[zr][:, -overlap:], pieces_edited[zm][:, :overlap]
                 else:
-                    ref_strip, mov_strip = tiles[zr][-overlap:, :], tiles[zm][:overlap, :]
+                    ref_strip, mov_strip = pieces_edited[zr][-overlap:, :], pieces_edited[zm][:overlap, :]
                 try:
                     raw = _pcc(_norm(ref_strip), _norm(mov_strip), upsample_factor=10, normalization='phase')
                     shift = raw[0] if isinstance(raw, tuple) else raw
@@ -598,7 +590,7 @@ class MRCReader:
 
         print("\n========== Refinement summary ==========")
         print(f"  section            : {self.section}")
-        print(f"  tiles refined      : {n}")
+        print(f"  edited pieces refined      : {n}")
         print(f"  correlation pairs  : {n_pairs}")
         print(f"  system rank        : {rank} / {2 * n}  "
               f"({'full' if full_rank else 'RANK-DEFICIENT'})")
@@ -664,20 +656,24 @@ class MRCReader:
                                          for p in pieces):
             self.refine_tile_alignment(mrc_filepath=mrc_filepath)
 
-        pix_um   = self.pixel_spacing_um
         theta       = np.deg2rad(self._section_rotation_angle(pieces))
 
         img, min_x, min_y = self._assemble_montage(mrc_filepath,*self._img_hw, self._feather_px, key)
                 
         tiles = []
         for p in pieces:
-            tiles.append({
-                        "z": p.get("ZValue"), 
-                        "stage_z    ": self._piece_stage_z_position(p),
-                        "px": self._piece_xy_position(p, key),
-                        "stage":  self._piece_stage_xy_position(p),
-                        })
+            px = self._piece_xy_position(p, key)          # {"x_um","y_um"} | None
+            st = self._piece_stage_xy_position(p)         # {"stage_x_um","stage_y_um"} | None
+            sz = self._piece_stage_z_position(p)          # {"stage_z_um"} | None
+            tiles.append(Tile(z_index=p.get("ZValue"),
+                            stage_z_um=(sz or {}).get("stage_z_um"),
+                            pixel_x_um=(px or {}).get("x_um"),
+                            pixel_y_um=(px or {}).get("y_um"),
+                            stage_x_um=(st or {}).get("stage_x_um"),
+                            stage_y_um=(st or {}).get("stage_y_um"),
+                        ))
         M, fit = self._fit_pixel_to_stage_rotation_matrix(tiles)
+
         if M is not None:
             print(f"[fit] pixel -> stage n={fit['n']} angle={fit['angle_deg']:.2f} deg"
                   f"det={fit['det']:+.3e} ({'flip' if fit['det'] < 0 else 'no flip'}) "
@@ -685,19 +681,16 @@ class MRCReader:
         else:
             print(f"[fit] pixel -> stage n={fit['n']}  {fit['message']}")
 
-        return {"image": img, 
-                "min_x_pixels": min_x, 
-                "min_y_pixels": min_y,
-                "pixel_spacing_um": pix_um, 
-                "rotation_deg": float(np.rad2deg(theta)),
-                "mrc_image_height_width": self._img_hw, 
-                "section": self.section,
-                "alignment": alignment, 
-                "tiles": tiles,
-                "stage_matrix": M, 
-                "stage_fit": fit,
-                "path": self.output_root,
-                "site_id": Path(mrc_filepath).parent.name }
+        img_h, img_w = self._img_hw
+        return MRCSummary(mrc_path=os.fspath(mrc_filepath),
+                            image=img, image_height=img_h, image_width=img_w,
+                            pixel_spacing_um=self.pixel_spacing_um,
+                            feather_pixels=self._feather_px,
+                            section=self.section, alignment=alignment, coord_field=key,
+                            rotation_deg=float(np.rad2deg(theta)),
+                            min_x_pixels=min_x, min_y_pixels=min_y,
+                            tiles=tiles, stage_matrix=M, stage_fit=fit, flip_x=self.MONTAGE_FLIP_X, flip_y=self.MONTAGE_FLIP_Y)
+
 
     def run_montage_loader_and_create_summary(self, mrc_filepath):
         if not self.section_pieces:

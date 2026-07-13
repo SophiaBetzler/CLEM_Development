@@ -133,7 +133,7 @@ class CLEMCorrelator:
                     "scale_y": sy,
                     "rotation_deg": rot,
                     "rmse_px": rmse,
-                    "text": ("scale x={sx:.4f}, y={sy:.4f}  rot={rot:.2f} deg   fit RMSE={rmse:.1f} px"),
+                    "text": (f"scale x={sx:.4f}, y={sy:.4f}  rot={rot:.2f} deg   fit RMSE={rmse:.1f} px"),
                 }
     
     # ---------------------------------------------------------------------------

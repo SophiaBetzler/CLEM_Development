@@ -51,6 +51,9 @@ import numpy as np
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from clem_correlation import CLEMCorrelator
+from clem_target_picking import CLEMPicker
+from clem_dataclasses import SiteDataSummary, MRCSummary
+from clem_tem_communication import TEMComm
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -526,10 +529,16 @@ class StagePickerWindow(tk.Toplevel):
     Coordinate convention: top = -Y, left = -X (matches SerialEM stage).
     """
 
-    def __init__(self, parent, mrc_gray, channels_gray, channel_names,
-                 pieces, pixel_spacing_um, tile_hw,
-                 warp_slice=None, n_z=1, image_shift_um=(0.0, 0.0),
-                 title="Stage Position Picker"):
+    def __init__(self, parent, clempicker, mrc_gray, channels_gray, channel_names,
+             warp_slice=None, n_z=1,
+             title="Stage Position Picker"):
+        self.clempicker = clempicker
+        
+        self._pieces   = clempicker.mrc.tiles
+        self._pix_um   = clempicker.pixel_spacing_um
+        self._tile_h   = clempicker.image_height
+        self._tile_w   = clempicker.image_width
+        self._img_shift = np.asarray([0.0, 0.0], dtype=float)
         super().__init__(parent)
         self.title(title)
         self.configure(bg=BG)
@@ -590,6 +599,7 @@ class StagePickerWindow(tk.Toplevel):
         else:
             self._fit_desc = "map: per-tile interpolation (no rotation fit)"
         print(f"[StagePicker] {self._fit_desc}")
+
 
         self._build_styles()
         self._build_ui()
@@ -715,6 +725,47 @@ class StagePickerWindow(tk.Toplevel):
                    style="Danger.TButton",
                    command=self._clear).grid(
                        row=3, column=1, sticky="ew", padx=(2, 0))
+        # ─────────────────────────────────────────────────────────────────
+        # NEW: Group & Export xg1 section
+        # ─────────────────────────────────────────────────────────────────
+        ttk.Separator(btn, orient="horizontal").grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+
+        ttk.Label(btn, text="paceTomo Export:", 
+                foreground=CYA, 
+                font=("Segoe UI", 9, "bold")).grid(
+                    row=5, column=0, columnspan=2, sticky="w", pady=(0, 2))
+
+        # Grouping radius input
+        radius_row = ttk.Frame(btn)
+        radius_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        ttk.Label(radius_row, text="Group radius (um):",
+                style="Sm.TLabel").pack(side="left")
+        self._radius_var = tk.StringVar(value="7.5")
+        ttk.Entry(radius_row, textvariable=self._radius_var, width=6).pack(
+            side="left", padx=(4, 0))
+
+        # Record magnification input
+        mag_row = ttk.Frame(btn)
+        mag_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        ttk.Label(mag_row, text="Record mag:",
+                style="Sm.TLabel").pack(side="left")
+        self._record_mag_var = tk.StringVar(value="40000")
+        ttk.Entry(mag_row, textvariable=self._record_mag_var, width=8).pack(
+            side="left", padx=(4, 0))
+
+        # Group & Export button
+        ttk.Button(btn, text="Group picks & Export xg1",
+                style="Accent.TButton",
+                command=self._group_and_export_xg1).grid(
+                    row=8, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+
+        # Status label for grouping
+        self._groups_status = tk.StringVar(value="")
+        ttk.Label(btn, textvariable=self._groups_status,
+                style="Sm.TLabel", foreground=BG3,
+                wraplength=255, justify="left").grid(
+                    row=9, column=0, columnspan=2, sticky="ew")
 
         tf = ttk.Frame(side)
         tf.grid(row=3, column=0, sticky="nsew", pady=(2, 0))
@@ -743,6 +794,186 @@ class StagePickerWindow(tk.Toplevel):
 
         # Initial render now that the layer controls exist.
         self._recompose()
+
+    def _group_and_export_xg1(self):
+        """
+        Group picks spatially and export each group as a paceTomo xg1 file.
+        
+        Uses CLEMPicker's group_picks() and generate_xg1_file() methods.
+        All the logic is in CLEMPicker - this is just the UI wrapper.
+        """
+        
+        # Validate: need picks first
+        if not self._picks:
+            messagebox.showwarning(
+                "No picks",
+                "Add at least one pick before exporting.",
+                parent=self)
+            return
+        
+        # Validate: need CLEMPicker
+        if self.clempicker is None:
+            messagebox.showerror(
+                "No CLEMPicker",
+                "CLEMPicker was not provided to this window.",
+                parent=self)
+            return
+        
+        # Parse group radius
+        try:
+            radius_um = float(self._radius_var.get())
+            if radius_um <= 0:
+                raise ValueError("radius must be positive")
+        except ValueError:
+            messagebox.showwarning(
+                "Invalid radius",
+                "Enter a positive number for the group radius (um).",
+                parent=self)
+            return
+        
+        # Parse record magnification
+        try:
+            record_mag = int(self._record_mag_var.get())
+            if record_mag <= 0:
+                raise ValueError("magnification must be positive")
+        except ValueError:
+            messagebox.showwarning(
+                "Invalid magnification",
+                "Enter a positive integer for the record magnification.",
+                parent=self)
+            return
+        
+        # Ask for output folder
+        output_folder = filedialog.askdirectory(
+            parent=self,
+            title="Choose output folder for xg1 files")
+        if not output_folder:
+            return
+        
+        try:
+            # ─────────────────────────────────────────────────────────
+            # Step 1: Group picks (all logic in CLEMPicker)
+            # ─────────────────────────────────────────────────────────
+            self._status.set("Grouping picks...")
+            self.update_idletasks()
+            
+            groups = self.clempicker.group_picks(radius_um=radius_um)
+            
+            if not groups:
+                messagebox.showwarning(
+                    "No groups",
+                    "Grouping produced no groups.",
+                    parent=self)
+                return
+            
+            # ─────────────────────────────────────────────────────────
+            # Step 2: Generate xg1 file for each group
+            # ─────────────────────────────────────────────────────────
+            xg1_files = []
+            for i, group in enumerate(groups):
+                self._status.set(f"Generating xg1 for group {i+1}/{len(groups)}...")
+                self.update_idletasks()
+                
+                xg1_path = self.clempicker.generate_xg1_file(
+                    group=group,
+                    record_mag=record_mag,
+                    output_folder=output_folder
+                )
+                xg1_files.append(xg1_path)
+            
+            # ─────────────────────────────────────────────────────────
+            # Step 3: Update UI to show results
+            # ─────────────────────────────────────────────────────────
+            self._draw_groups_on_canvas(groups)
+            
+            total_picks = sum(len(g.picks) for g in groups)
+            self._groups_status.set(
+                f"Created {len(groups)} groups from {total_picks} picks.\n"
+                f"xg1 files saved to: {output_folder}")
+            
+            self._status.set(
+                f"Done! {len(groups)} group(s), {len(xg1_files)} xg1 file(s).")
+            
+            # Show success dialog
+            file_list = "\n".join(f"  - {os.path.basename(f)}" for f in xg1_files[:5])
+            if len(xg1_files) > 5:
+                file_list += f"\n  ... (+{len(xg1_files) - 5} more)"
+            
+            messagebox.showinfo(
+                "Export complete",
+                f"Grouped {total_picks} picks into {len(groups)} group(s).\n\n"
+                f"Generated {len(xg1_files)} xg1 file(s) in:\n{output_folder}\n\n"
+                f"{file_list}",
+                parent=self)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror(
+                "Group/Export error",
+                f"An error occurred:\n{str(e)}",
+                parent=self)
+            
+    def _draw_groups_on_canvas(self, groups):
+        """
+        Draw group boundaries and tracking targets on the canvas.
+        
+        - Draws colored circles around each group
+        - Highlights tracking targets with a star marker
+        """
+        
+        # Store group artists for cleanup later
+        if not hasattr(self, '_group_artists'):
+            self._group_artists = []
+        
+        # Clear old group artists
+        for a in self._group_artists:
+            try: a.remove()
+            except Exception: pass
+        self._group_artists = []
+        
+        # Colors for different groups
+        group_colors = ['#00FF00', '#FF00FF', '#FFFF00', '#00FFFF', 
+                        '#FF8800', '#88FF00', '#0088FF', '#FF0088']
+        
+        for i, group in enumerate(groups):
+            color = group_colors[i % len(group_colors)]
+            
+            # Get pixel coordinates (in display frame)
+            for pick in group.picks:
+                # Convert to display coords
+                dx = _unflip_x(pick.pixel_x_um, self._W) if MONTAGE_FLIP_X else pick.pixel_x_um
+                dy = _unflip_y(pick.pixel_y_um, self._H) if MONTAGE_FLIP_Y else pick.pixel_y_um
+                
+                # Draw circle around each group member
+                circle = self._ax.plot(dx, dy, 'o', 
+                                    markersize=20,
+                                    markerfacecolor='none',
+                                    markeredgecolor=color,
+                                    markeredgewidth=2,
+                                    zorder=4)
+                self._group_artists.extend(circle)
+                
+                # Add group label
+                txt = self._ax.text(dx + 15, dy + 15, f"G{group.group_id}",
+                                color=color, fontsize=8, fontweight='bold',
+                                zorder=5)
+                self._group_artists.append(txt)
+            
+            # Highlight tracking target with a star
+            target = group.tracking
+            dx = _unflip_x(target.pixel_x_um, self._W) if MONTAGE_FLIP_X else target.pixel_x_um
+            dy = _unflip_y(target.pixel_y_um, self._H) if MONTAGE_FLIP_Y else target.pixel_y_um
+            
+            star = self._ax.plot(dx, dy, '*',
+                            markersize=15,
+                            markerfacecolor=color,
+                            markeredgecolor='white',
+                            markeredgewidth=1,
+                            zorder=6)
+            self._group_artists.extend(star)
+        
+        self._canvas.draw_idle()
 
     def _build_layers_panel(self, container):
         """Scrollable list of layers: TEM (MRC) + each z-stack channel, each
@@ -1021,32 +1252,36 @@ class StagePickerWindow(tk.Toplevel):
     def _on_click(self, event):
         if event.button != 1 or event.inaxes is not self._ax:
             return
-        if _shift_held(event):          # Shift+drag pans; don't record a pick
+        if _shift_held(event):
             return
         if event.xdata is None:
             return
 
-        # Data coords are full-res montage pixels in the display (flipped) frame;
-        # un-mirror to the TRUE montage pixel for the stage/crop math.  Markers
-        # are drawn at the clicked display coords (dx/dy), correct on the flipped
-        # view because the flip is fixed.
         dx, dy = event.xdata, event.ydata
         px = _unflip_x(dx, self._W)
         py = _unflip_y(dy, self._H)
-        sx, sy = self._stage_from_pixel(px, py)
-
+        
+        # NEW: Call CLEMPicker to create the Pick (does all the coord math)
+        pick = self.clempicker.add_pick_from_pixel(px, py)
+        
+        # Store display coords for drawing
         self._picks.append({
-            "px": px,  "py": py,
-            "dx": dx,  "dy": dy,
-            "sx": sx,  "sy": sy,
+            "pick": pick,        # ← Full Pick object
+            "px": pick.pixel_x_um,
+            "py": pick.pixel_y_um,
+            "dx": dx,
+            "dy": dy,
+            "sx": pick.stage_x_um,  # ← Comes from CLEMPicker!
+            "sy": pick.stage_y_um,
         })
+        
         self._refresh_tree()
         self._redraw_points()
         self._status.set(
             f"Point #{len(self._picks)}\n"
-            f"Stage X:  {sx:.3f} um\n"
-            f"Stage Y:  {sy:.3f} um\n\n"
-            f"Pixel:  ({px:.0f}, {py:.0f})")
+            f"Stage X:  {pick.stage_x_um:.3f} um\n"
+            f"Stage Y:  {pick.stage_y_um:.3f} um\n\n"
+            f"Pixel:  ({pick.pixel_x_um:.0f}, {pick.pixel_y_um:.0f})")
 
     def _redraw_points(self):
         for a in self._pt_artists:
@@ -1090,6 +1325,7 @@ class StagePickerWindow(tk.Toplevel):
 
     def _clear(self):
         self._picks.clear()
+        self.clempicker.clear_picks()  # ← NEW: Sync with CLEMPicker
         self._refresh_tree()
         self._redraw_points()
         self._status.set("All points cleared.")
@@ -1262,11 +1498,12 @@ class StagePickerWindow(tk.Toplevel):
 
 class RegistrationApp(tk.Tk):
 
-    def __init__(self, mrc_reader, site_id):
+    def __init__(self, mrc_reader, site_data):
         super().__init__()
         self.mrc_reader = mrc_reader
         self.correlator = CLEMCorrelator(mrc_reader=self.mrc_reader)
-        self.site_id = site_id
+        self.site_data = site_data
+        self.site_id = self.site_data.site_id
         self.title("MRC / OME-TIFF Registration Tool")
         self.configure(bg=BG)
         self.minsize(1150, 820)
@@ -1301,9 +1538,11 @@ class RegistrationApp(tk.Tk):
         if self.site_id is not None:
             self._load_site_data()
 
-    def _display_loaded_site_data(self, data):
-        self._display_loaded_mrc_data(data)
-        self._display_loaded_tiff_data(data)
+    def _display_loaded_site_data(self):            
+        if self.site_data.mrc is not None:
+            self._display_loaded_mrc_data()
+        if self.site_data.tiff is not None:
+            self._display_loaded_tiff_data()
 
     def _display_loaded_mrc_data(self, data):
         self.mrc_file_path = os.fspath(data["mrc_path"])
@@ -1648,8 +1887,8 @@ class RegistrationApp(tk.Tk):
             messagebox.showerror("MRC load error", str(e))
 
     def _load_site_data(self):
-        data = self.mrc_reader.load_latest_from_site(self.site_id)
-        self._display_loaded_site_data(data)
+        self.site_data = self.mrc_reader.load_latest_from_site(self.site_id)
+        self._display_loaded_site_data()
 
     def _resolve_mrc_path(self, mdoc_path, global_info):
         """Locate the montage MRC for an mdoc, robust to stale Windows paths.
@@ -1688,8 +1927,8 @@ class RegistrationApp(tk.Tk):
             return
 
         try:
-            data = self.mrc_reader.load_mrc_montage_data(path)
-            self._display_loaded_mrc_data(data)
+            self.mrc_reader.load_mrc_into(self.site_data, path)
+            self.mrc_reader.load_mrc_into(self.site_data, path)
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
             messagebox.showerror("MRC montage load error", str(e))
@@ -1702,8 +1941,8 @@ class RegistrationApp(tk.Tk):
             return
 
         try:
-            data = self.mrc_reader.load_ome_tiff_data(path)
-            self._display_loaded_tiff_data(data)
+            self.mrc_reader.load_tiff_into(self.site_data, path)
+            self._display_loaded_site_data()
             self.status_var.set("OME-TIFF loaded.")
         except Exception as e:
             messagebox.showerror("TIFF load error", str(e))
@@ -2054,9 +2293,12 @@ class RegistrationApp(tk.Tk):
             self.tree.insert("","end",values=(i+1,m,t))
 
     def _remove_last(self):
-        if self.point_pairs:
-            self.point_pairs.pop(); self._update_tree()
-            self._draw_mrc(keep_view=True); self._draw_tiff(keep_view=True)
+        if self._picks:
+            self._picks.pop()
+            self.clempicker.remove_last_pick()  # ← NEW: Sync with CLEMPicker
+            self._refresh_tree()
+            self._redraw_points()
+            self._status.set(f"Removed last point.\n{len(self._picks)} remaining.")
 
     def _clear_points(self):
         self.point_pairs.clear(); self.warped_channels.clear()
@@ -2076,6 +2318,9 @@ class RegistrationApp(tk.Tk):
             result = self.correlator.apply_transform(point_pairs=self.point_pairs, transform_type=ttype,
             tiff_stack=self.tiff_stack, mrc_shape=self.mrc_image.shape, flip_x=bool(self.flip_x.get()), flip_y=bool(self.flip_y.get()),
             status_cb=status_cb,)
+            self.site_data.set_registration(result, transform_type=ttype,
+                                   flip_x=bool(self.flip_x.get()),
+                                   flip_y=bool(self.flip_y.get()))
         except ValueError as e:
             messagebox.showwarning("Not enough points", str(e))
             return
@@ -2095,7 +2340,6 @@ class RegistrationApp(tk.Tk):
         self.status_var.set("{ttype.capitalize()} applied -- {C} ch warped.\n"
                         f"{fit_txt}\nClick Show Overlay.")
         
-
         msg = (
                     f"{ttype.capitalize()} from {n_pairs} pairs.\n"
                     f"{C} ch warped to grid ({mrc_w} x {mrc_h}).\n\n"
@@ -2352,17 +2596,42 @@ class RegistrationApp(tk.Tk):
             channel_names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)]
                              for i in range(C)]
             n_z = self.tiff_stack.shape[1] if self.tiff_stack is not None else 1
+            from clem_target_picking import CLEMPicker
+            from clem_dataclasses import SiteDataSummary, MRCSummary, RegistrationInfo
+            from clem_tem_communication import TEMComm
+
+            # Set up site_data for CLEMPicker
+            mrc_summary = MRCSummary(
+                image=self.mrc_image,
+                image_height=self.mrc_image.shape[0],
+                image_width=self.mrc_image.shape[1],
+                pixel_spacing_um=self.mrc_pixel_spacing_um,
+                min_x_pixels=0,
+                min_y_pixels=0,
+                coord_field='StageXYZ',
+                tiles=self.mrc_current_pieces
+            )
+
+            site_data = SiteDataSummary(
+                site_id='site_001',
+                path='/tmp',
+                mrc=mrc_summary,
+                registration=RegistrationInfo(),
+                picks=[]
+            )
+
+            # Create CLEMPicker
+            clempicker = CLEMPicker(site_data, TEMComm(offline=True))
+
+            # Pass it to StagePickerWindow
             StagePickerWindow(
                 win,
+                clempicker       = clempicker,           # ← NEW!
                 mrc_gray         = self.mrc_image,
                 channels_gray    = self.warped_channels,
                 channel_names    = channel_names,
-                pieces           = self.mrc_current_pieces,
-                pixel_spacing_um = self.mrc_pixel_spacing_um,
-                tile_hw          = self.mrc_img_hw,
                 warp_slice       = self._warp_slice_to_grid,
                 n_z              = n_z,
-                image_shift_um   = (0.0, 0.0),   # enter ReportImageShift()[4],[5] in picker
                 title            = "Stage Position Picker",
             )
 
