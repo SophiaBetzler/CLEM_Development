@@ -139,9 +139,9 @@ class ExecutiveControls:
             seen.add(site_id)
             site_data = SiteDataSummary(site_id=site_id, path=os.path.join(self.mrc.output_root, site_id))
             site_data.set_acquisition_from_csv_row(site)
-            ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data)
+            ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data, tem_communication=self.tem)
             ui.mainloop()
-            
+
 
 
         #     montage_summary = self.mrc.run_montage_loader_and_create_summary(os.path.join(self.path, montage_file))

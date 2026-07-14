@@ -317,16 +317,8 @@ class MRCReader:
         return self.montages
     
     def load_mrc_montage_data(self, mrc_path):
-        montages = self.load_mrc_montage(mrc_path)
-
-        return {
-            "mrc_path": mrc_path,
-            "montages": montages,
-            "section_pieces": self.section_pieces,
-            "mrc_image_hight_width": self._img_hw,
-            "feather_pixel": self._feather_px,
-            "pixel_spacing_um": self.pixel_spacing_um,
-        }
+        self.load_mrc_montage(mrc_path)
+        return self.build_montage_summary(mrc_path)
 
 
     def load_ome_tiff(self, ome_path):
@@ -368,12 +360,11 @@ class MRCReader:
     
     def load_ome_tiff_data(self, ome_path):
         tiff_stack, tiff_info = self.load_ome_tiff(ome_path)
-
-        return {
-                    "tiff_ome_path": ome_path,
-                    "tiff_stack_czyx": tiff_stack,
-                    "tiff_info": tiff_info,
-                }
+        c, z, y, x = tiff_stack.shape
+        return TiffSummary(
+                ome_path=os.path.abspath(os.fspath(ome_path)),
+                stack_czyx=tiff_stack, num_channels=c, num_z_slices=z, stack_height=y,
+                stack_width=x,info=tiff_info,)
 
     def parse_mdoc(self, mdoc_filepath):
         mdoc_path = mdoc_filepath
@@ -422,9 +413,11 @@ class MRCReader:
         if sx1 > sx0 and sy1 > sy0:
             out[sy0-y0: sy1-y0, sx0-x0:sx1-x0] = full[sy0:sy1, sx0:sx1]
 
+        return out
 
     def _fov_in_px(self, fov_um):
         cw = max(2, int(round(fov_um / self.pixel_spacing_um)))
+        return cw
         
 
     def write_mrc_crops(self, picks, mrc_full, fov_um, output_root, prefix='crop'):
@@ -453,7 +446,7 @@ class MRCReader:
                 for pi, pick in enumerate(picks):
                     stacks[pi][z, c+1] = self._crop_centered(full, pick.pixel_x_um, pick.pixel_y_um, cw)
         res = (1.0 / self.pixel_spacing_um) if self.pixel_spacing_um > 0 else 1.0
-        labels = (["TEM"]+[f"Ch{c}" for c in range(n_channels)]) * n_z
+        labels = (["TEM"]+[f"Ch{c}" for c in arange(n_channels)]) * n_z
         written = []
         for pi, pick in enumerate(picks):
             out = f"{output_root}{prefix}_{pick.pick_id}.tif"

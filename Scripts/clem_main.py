@@ -7,7 +7,7 @@ from clem_general import ExecutiveControls
 from pathlib import Path
 
 
-PATH = r"C:\Users\CZII\Documents\Data\s26jul01b"
+PATH = r"C:\Users\CZII\Documents\Data\s26jul09a"
 SAMPLE_TYPE = 'airyscan'
 OFFLINE = True
 if SAMPLE_TYPE == 'airyscan':

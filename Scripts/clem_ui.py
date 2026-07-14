@@ -529,19 +529,17 @@ class StagePickerWindow(tk.Toplevel):
     Coordinate convention: top = -Y, left = -X (matches SerialEM stage).
     """
 
-    def __init__(self, parent, clempicker, mrc_gray, channels_gray, channel_names,
+    def __init__(self, parent, clem_picker, mrc_reader, mrc_gray, channels_gray, channel_names,
              warp_slice=None, n_z=1,
              title="Stage Position Picker"):
-        self.clempicker = clempicker
         
-        self._pieces   = clempicker.mrc.tiles
-        self._pix_um   = clempicker.pixel_spacing_um
-        self._tile_h   = clempicker.image_height
-        self._tile_w   = clempicker.image_width
-        self._img_shift = np.asarray([0.0, 0.0], dtype=float)
         super().__init__(parent)
         self.title(title)
         self.configure(bg=BG)
+
+        self.clem_picker = clem_picker
+        self.mrc_reader = mrc_reader
+        self._pix_um = clem_picker.mrc.pixel_spacing_um
 
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
@@ -551,58 +549,23 @@ class StagePickerWindow(tk.Toplevel):
         self.minsize(700, 400)
         self.maxsize(screen_w, screen_h - 100)
 
-        self._pieces   = pieces
-        self._pix_um   = pixel_spacing_um
-        self._tile_h, self._tile_w = tile_hw
-
-        # A single image-shift correction (um) added to EVERY tile's
-        # StagePosition.  Read it off the scope with ReportImageShift()[4],[5]
-        # and enter it here (the picker is offline and cannot query SerialEM).
-        self._img_shift = np.asarray(image_shift_um[:2], dtype=float)
-
         self._picks    = []
         self._pt_artists = []
 
-        # Full-resolution grayscale (0..1) source layers, all on the montage grid:
-        #   _mrc_full      -> the TEM reference (MRC)
-        #   _chan_full[i]  -> channel i of the OME-TIFF z-stack, warped to grid
-        # The picker renders at FULL RESOLUTION via viewport rendering: instead
-        # of ever building a composite of the whole montage (gigabytes of RGB),
-        # it composites only the CURRENTLY VISIBLE window, sampled to about
-        # screen resolution.  Zoom in and the visible window is small, so it is
-        # sampled at stride 1 - true full resolution under the cursor - while the
-        # array handed to matplotlib stays ~screen-sized, so memory stays bounded
-        # no matter how large the montage is.  Picks, the pixel->stage fit and
-        # FOV crops are all in true full-res montage pixels.
         self._mrc_full   = mrc_gray
         self._chan_full  = list(channels_gray)
         self._chan_names = list(channel_names)
-
-        # For per-point FOV crops: callback (c, z) -> warped 2-D slice on the
-        # MRC grid, and the number of z-planes in the fluorescence stack.
         self._warp_slice = warp_slice
         self._n_z        = max(1, int(n_z))
 
         self._H, self._W  = self._mrc_full.shape[:2]
-        # Max samples across the longer side of the view; the rendered window
-        # never exceeds ~this in either dimension (bounds memory & redraw cost).
         self._view_target   = 2000
         self._render_pending = False
 
-        # Fit a no-shear similarity map (pixel -> stage) from the tiles.
-        self._fit      = self._fit_pixel_to_stage()
-        if self._fit is not None:
-            kind = "rotation+flip" if self._fit["reflect"] else "rotation"
-            self._fit_desc = (f"map: similarity fit ({kind}), "
-                              f"{self._fit['n']} tiles, rmse "
-                              f"{self._fit['rmse']:.3f} um")
-        else:
-            self._fit_desc = "map: per-tile interpolation (no rotation fit)"
-        print(f"[StagePicker] {self._fit_desc}")
-
-
         self._build_styles()
         self._build_ui()
+
+        
 
     def _build_styles(self):
         s = ttk.Style(self)
@@ -667,22 +630,6 @@ class StagePickerWindow(tk.Toplevel):
                        f"(top=-Y, left=-X)",
                   style="Sm.TLabel", foreground=BG3).pack(anchor="w")
 
-        # ---- Image-shift correction (um), added to every tile's StagePosition.
-        # Read it from the scope with ReportImageShift()[4],[5] and type it here.
-        is_row = ttk.Frame(hdr); is_row.pack(fill="x", pady=(3, 0))
-        ttk.Label(is_row, text="Image shift (um)  X", style="Sm.TLabel").pack(
-            side="left")
-        self._isx_var = tk.StringVar(value=f"{self._img_shift[0]:.4f}")
-        ttk.Entry(is_row, textvariable=self._isx_var, width=8).pack(
-            side="left", padx=(2, 4))
-        ttk.Label(is_row, text="Y", style="Sm.TLabel").pack(side="left")
-        self._isy_var = tk.StringVar(value=f"{self._img_shift[1]:.4f}")
-        ttk.Entry(is_row, textvariable=self._isy_var, width=8).pack(
-            side="left", padx=(2, 4))
-        ttk.Button(is_row, text="Apply", style="Sm.TButton",
-                   command=self._apply_image_shift).pack(side="left")
-
-        ttk.Separator(hdr, orient="horizontal").pack(fill="x", pady=(4, 2))
 
         # ---- Layers: checkboxes + per-layer brightness/contrast --------------
         layers_lf = ttk.LabelFrame(side, text="Layers  (check = show)",
@@ -812,7 +759,7 @@ class StagePickerWindow(tk.Toplevel):
             return
         
         # Validate: need CLEMPicker
-        if self.clempicker is None:
+        if self.clem_picker is None:
             messagebox.showerror(
                 "No CLEMPicker",
                 "CLEMPicker was not provided to this window.",
@@ -857,7 +804,7 @@ class StagePickerWindow(tk.Toplevel):
             self._status.set("Grouping picks...")
             self.update_idletasks()
             
-            groups = self.clempicker.group_picks(radius_um=radius_um)
+            groups = self.clem_picker.group_picks(radius_um=radius_um)
             
             if not groups:
                 messagebox.showwarning(
@@ -874,7 +821,7 @@ class StagePickerWindow(tk.Toplevel):
                 self._status.set(f"Generating xg1 for group {i+1}/{len(groups)}...")
                 self.update_idletasks()
                 
-                xg1_path = self.clempicker.generate_xg1_file(
+                xg1_path = self.clem_picker.generate_xg1_file(
                     group=group,
                     record_mag=record_mag,
                     output_folder=output_folder
@@ -1109,171 +1056,18 @@ class StagePickerWindow(tk.Toplevel):
                 parts.append(f"Ch{i}")
         return "+".join(parts) if parts else "none"
 
-    def _tile_origin(self, piece):
-        c = piece.get("AlignedPieceCoords",
-                      piece.get("PieceCoordinates", [0, 0, 0]))
-        return float(c[0]), float(c[1])
-
-    def _stage_anchor(self, piece):
-        """This tile's stage position (um) with the single image-shift
-        correction added.  Offline: the correction comes from self._img_shift
-        (entered in the UI), NOT from a live ReportImageShift() call.  Returns
-        None when the tile has no usable StagePosition."""
-        sp = piece.get("StagePosition", None)
-        if not isinstance(sp, (list, tuple)) or len(sp) < 2:
-            return None
-        return np.asarray(sp[:2], dtype=float) + self._img_shift
-
-    def _apply_image_shift(self):
-        """Read the image-shift correction (um) from the entries, add it to all
-        tile stage positions (re-fit the pixel->stage map), and re-derive any
-        already-placed picks.  Pixel coordinates are unchanged - only the stage
-        values shift."""
-        try:
-            x = float(self._isx_var.get()); y = float(self._isy_var.get())
-        except ValueError:
-            self._status.set("Image shift: enter two numbers (um).")
-            return
-        self._img_shift = np.asarray([x, y], dtype=float)
-        # Re-fit the pixel->stage map with the corrected anchors.
-        self._fit = self._fit_pixel_to_stage()
-        if self._fit is not None:
-            kind = "rotation+flip" if self._fit["reflect"] else "rotation"
-            self._fit_desc = (f"map: similarity fit ({kind}), "
-                              f"{self._fit['n']} tiles, rmse "
-                              f"{self._fit['rmse']:.3f} um")
-        else:
-            self._fit_desc = "map: per-tile interpolation (no rotation fit)"
-        # Re-derive existing picks from their (unchanged) pixel coordinates.
-        for pick in self._picks:
-            pick["sx"], pick["sy"] = self._stage_from_pixel(pick["px"], pick["py"])
-        self._refresh_tree()
-        self._redraw_points()
-        self._status.set(f"Image shift applied: ({x:+.4f}, {y:+.4f}) um added "
-                         f"to all tiles.\n{self._fit_desc}")
-
-    def _fit_pixel_to_stage(self):
-        """Fit a no-shear similarity (rotation + uniform scale + optional flip
-        + translation) mapping montage-pixel coords -> stage microns, using
-        each tile's pixel centre and StagePosition (+ image-shift correction)
-        as a correspondence.
-
-        Returns a dict describing the transform, or None when it cannot/should
-        not be fit (fewer than 2 tiles, or stage positions too clustered, e.g.
-        a pure image-shift montage) - in which case the caller falls back to
-        the per-tile interpolation.
-        """
-        pts_px, pts_st = [], []
-        for p in self._pieces:
-            sp = self._stage_anchor(p)
-            if sp is None:
-                continue
-            tx, ty = self._tile_origin(p)
-            pts_px.append((tx + self._tile_w / 2.0, ty + self._tile_h / 2.0))
-            pts_st.append((float(sp[0]), float(sp[1])))
-
-        if len(pts_px) < 2:
-            return None
-
-        P = np.asarray(pts_px, dtype=np.float64)
-        S = np.asarray(pts_st, dtype=np.float64)
-        # Degenerate if stage barely varies (image-shift montage): fall back.
-        if float(S.std(axis=0).max()) < 1e-6:
-            return None
-
-        n   = len(P)
-        px, py = P[:, 0], P[:, 1]
-        sx, sy = S[:, 0], S[:, 1]
-        ones, zeros = np.ones(n), np.zeros(n)
-
-        best = None
-        for reflect in (False, True):
-            A = np.zeros((2 * n, 4))
-            b = np.zeros(2 * n)
-            if not reflect:
-                # rotation:  sx = a*px - b*py + tx ;  sy = b*px + a*py + ty
-                A[0::2] = np.column_stack([px, -py, ones, zeros])
-                A[1::2] = np.column_stack([py,  px, zeros, ones])
-            else:
-                # flip:      sx = a*px + b*py + tx ;  sy = b*px - a*py + ty
-                A[0::2] = np.column_stack([px,  py, ones, zeros])
-                A[1::2] = np.column_stack([-py, px, zeros, ones])
-            b[0::2] = sx
-            b[1::2] = sy
-            sol, *_ = np.linalg.lstsq(A, b, rcond=None)
-            rmse = float(np.sqrt(np.mean((A @ sol - b) ** 2)))
-            cand = {"reflect": reflect, "a": float(sol[0]), "b": float(sol[1]),
-                    "tx": float(sol[2]), "ty": float(sol[3]),
-                    "rmse": rmse, "n": n}
-            if best is None or rmse < best["rmse"]:
-                best = cand
-        return best
-
-    def _apply_fit(self, px, py):
-        f = self._fit
-        a, b, tx, ty = f["a"], f["b"], f["tx"], f["ty"]
-        if not f["reflect"]:
-            return a * px - b * py + tx, b * px + a * py + ty
-        return a * px + b * py + tx, b * px - a * py + ty
-
-    def _stage_from_pixel(self, px, py):
-        # Preferred: the fitted similarity map (handles rotation + flip + scale).
-        if self._fit is not None:
-            return self._apply_fit(px, py)
-
-        # Fallback: per-tile inverse-distance interpolation (no rotation),
-        # used only when the similarity fit was not possible.
-        containing = []
-        for p in self._pieces:
-            tx, ty = self._tile_origin(p)
-            if (tx <= px < tx + self._tile_w and
-                    ty <= py < ty + self._tile_h):
-                containing.append(p)
-        candidates = containing if containing else self._pieces
-
-        w_sum = sx_sum = sy_sum = 0.0
-        for p in candidates:
-            tx, ty = self._tile_origin(p)
-            cx = tx + self._tile_w / 2.0
-            cy = ty + self._tile_h / 2.0
-            dist = max(0.01, ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5)
-            w    = 1.0 / dist
-            sp   = self._stage_anchor(p)
-            if sp is None:
-                sp = self._img_shift            # no StagePosition -> shift only
-            sx = float(sp[0]) + (px - cx) * self._pix_um
-            sy = float(sp[1]) + (py - cy) * self._pix_um
-            w_sum  += w
-            sx_sum += w * sx
-            sy_sum += w * sy
-
-        return sx_sum / w_sum, sy_sum / w_sum
-
     def _on_click(self, event):
-        if event.button != 1 or event.inaxes is not self._ax:
-            return
-        if _shift_held(event):
+        if event.button != 1 or event.inaxes is not self._H or _shift_held(event):
             return
         if event.xdata is None:
             return
 
-        dx, dy = event.xdata, event.ydata
         px = _unflip_x(dx, self._W)
         py = _unflip_y(dy, self._H)
-        
-        # NEW: Call CLEMPicker to create the Pick (does all the coord math)
-        pick = self.clempicker.add_pick_from_pixel(px, py)
-        
-        # Store display coords for drawing
-        self._picks.append({
-            "pick": pick,        # ← Full Pick object
-            "px": pick.pixel_x_um,
-            "py": pick.pixel_y_um,
-            "dx": dx,
-            "dy": dy,
-            "sx": pick.stage_x_um,  # ← Comes from CLEMPicker!
-            "sy": pick.stage_y_um,
-        })
+
+        pick = self.clem_picker.add_pick_from_pixel(px, py)
+
+        self._picks.append(pick)
         
         self._refresh_tree()
         self._redraw_points()
@@ -1289,7 +1083,7 @@ class StagePickerWindow(tk.Toplevel):
             except Exception: pass
         self._pt_artists = []
         for i, pick in enumerate(self._picks):
-            x, y = pick["dx"], pick["dy"]
+            x, y = _unflip_x(pick.pixel_x_um, self._W), _unflip_y(pick.pixel_y_um, self._H)
             arm  = 14
             l1, = self._ax.plot([x-arm, x+arm], [y, y],
                                 color=CYA, lw=1.2, zorder=5)
@@ -1307,10 +1101,10 @@ class StagePickerWindow(tk.Toplevel):
         for i, pick in enumerate(self._picks):
             self._tree.insert("", "end", values=(
                 i + 1,
-                f"{pick['sx']:.3f}",
-                f"{pick['sy']:.3f}",
-                f"{pick['px']:.0f}",
-                f"{pick['py']:.0f}",
+                f"{pick.stage_x_um:.3f}",
+                f"{pick.stage_y_um:.3f}",
+                f"{pick.pixel_x_um:.0f}",
+                f"{pick.pixel_y_um:.0f}",
             ))
         if self._picks:
             self._tree.see(self._tree.get_children()[-1])
@@ -1318,6 +1112,7 @@ class StagePickerWindow(tk.Toplevel):
     def _remove_last(self):
         if self._picks:
             self._picks.pop()
+            self.clem_picker.remove_last_pick()
             self._refresh_tree()
             self._redraw_points()
             self._status.set(
@@ -1325,92 +1120,10 @@ class StagePickerWindow(tk.Toplevel):
 
     def _clear(self):
         self._picks.clear()
-        self.clempicker.clear_picks()  # ← NEW: Sync with CLEMPicker
+        self.clem_picker.clear_picks()  # ← NEW: Sync with CLEMPicker
         self._refresh_tree()
         self._redraw_points()
         self._status.set("All points cleared.")
-
-    def _fov_width_px(self):
-        """Parse the FOV width entry (um) into an even crop side in full-res
-        pixels.  Returns an int, None when blank, or 'bad' when invalid."""
-        s = self._fov_var.get().strip()
-        if not s:
-            return None
-        try:
-            fov_um = float(s)
-        except ValueError:
-            return "bad"
-        if fov_um <= 0 or self._pix_um <= 0:
-            return "bad"
-        cw = int(round(fov_um / self._pix_um))
-        cw = max(2, cw)
-        if cw % 2:                      # keep it even for a symmetric crop
-            cw += 1
-        return cw
-
-    @staticmethod
-    def _crop_centered(full, px, py, cw):
-        """Extract a cw x cw window centred on (px, py) in full-res pixels.
-        Regions outside the image are zero-padded so every crop is exactly
-        cw x cw."""
-        H, W = full.shape
-        half = cw // 2
-        x0 = int(round(px)) - half
-        y0 = int(round(py)) - half
-        out = np.zeros((cw, cw), dtype=np.float32)
-        sx0, sy0 = max(0, x0), max(0, y0)
-        sx1, sy1 = min(W, x0 + cw), min(H, y0 + cw)
-        if sx1 > sx0 and sy1 > sy0:
-            out[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = full[sy0:sy1, sx0:sx1]
-        return out
-
-    def _write_crops(self, root, cw):
-        """Write one registered z-stack crop per picked point.
-
-        Each point -> an ImageJ hyperstack (Z, C, cw, cw) float32, where
-        C = TEM + every fluorescence channel and Z = number of z-planes (the
-        single TEM plane is replicated across z).  All channels are included
-        regardless of which layer checkboxes are ticked - those only affect the
-        on-screen view.  Files are named <root>_<point#>.tif.  Returns the list
-        of basenames written."""
-        n_pts = len(self._picks)
-        n_ch  = len(self._chan_full)
-        C_out = 1 + n_ch
-        Z     = self._n_z
-
-        # One output buffer per point.  Buffers are small (crop-sized), so we
-        # can warp each (channel, z) slice just once and crop every point from
-        # it rather than re-warping per point.
-        stacks = [np.zeros((Z, C_out, cw, cw), dtype=np.float32)
-                  for _ in range(n_pts)]
-
-        # TEM (channel 0), replicated across z.
-        for pi, pick in enumerate(self._picks):
-            tem = self._crop_centered(self._mrc_full, pick["px"], pick["py"], cw)
-            for z in range(Z):
-                stacks[pi][z, 0] = tem
-
-        # Fluorescence channels, full z-extent.
-        for c in range(n_ch):
-            for z in range(Z):
-                self._status.set(f"Cropping channel {c}  z {z + 1}/{Z} ...")
-                self.update_idletasks()
-                full = self._warp_slice(c, z)
-                for pi, pick in enumerate(self._picks):
-                    stacks[pi][z, c + 1] = self._crop_centered(
-                        full, pick["px"], pick["py"], cw)
-
-        res    = (1.0 / self._pix_um) if self._pix_um > 0 else 1.0
-        labels = (["TEM"] + [f"Ch{c}" for c in range(n_ch)]) * Z
-        written = []
-        for pi in range(n_pts):
-            out_path = f"{root}_{pi + 1}.tif"
-            tifffile.imwrite(
-                out_path, stacks[pi], imagej=True,
-                resolution=(res, res),
-                metadata={"axes": "ZCYX", "unit": "um", "Labels": labels})
-            written.append(os.path.basename(out_path))
-        return written
 
     def _export(self):
         if not self._picks:
@@ -1418,8 +1131,8 @@ class StagePickerWindow(tk.Toplevel):
                                    "Pick at least one point first.",
                                    parent=self)
             return
-        # Validate the FOV width before asking for a path, so a typo fails fast.
-        fov = self._fov_width_px()
+
+        fov = self._fov_width_um()
         if fov == "bad":
             messagebox.showwarning(
                 "FOV width",
@@ -1448,10 +1161,10 @@ class StagePickerWindow(tk.Toplevel):
                 for i, pick in enumerate(self._picks):
                     fh.write(
                         f"{i+1}\t"
-                        f"{pick['sx']:.4f}\t"
-                        f"{pick['sy']:.4f}\t"
-                        f"{pick['px']:.1f}\t"
-                        f"{pick['py']:.1f}\n"
+                        f"{pick.stage_x_um:.4f}\t"
+                        f"{pick.stage_y_um:.4f}\t"
+                        f"{pick.pixel_x_um:.1f}\t"
+                        f"{pick.pixel_y_um:.1f}\n"
                     )
 
             # -- save a screenshot of the picker canvas -----------------------
@@ -1472,14 +1185,8 @@ class StagePickerWindow(tk.Toplevel):
                     crop_msg = ("\n\nFOV crops skipped: no channel data is "
                                 "available for this picker.")
                 else:
-                    written = self._write_crops(root, fov)
-                    self._status.set(
-                        f"Wrote {len(written)} FOV crop stack(s).")
-                    shown = "\n".join(written[:8])
-                    if len(written) > 8:
-                        shown += f"\n... (+{len(written) - 8} more)"
-                    crop_msg = (f"\n\n{len(written)} FOV crop z-stack(s) "
-                                f"({fov}x{fov} px) saved:\n{shown}")
+                   res = self.mrc_reader.write_fov_crops(picks=self._picks, mrc_full=self._mrc_full, warp_slice=self._warp_slice, n_channels=len(self._chan_full), n_z=self._n_z, fov_um=fov, output_root=root)
+                   crop_msg = f"\n\n{len(res['tif'])} tif + {len(res['mrc'])} .mrc crop(s) written."
 
             messagebox.showinfo(
                 "Exported",
@@ -1498,9 +1205,10 @@ class StagePickerWindow(tk.Toplevel):
 
 class RegistrationApp(tk.Tk):
 
-    def __init__(self, mrc_reader, site_data):
+    def __init__(self, mrc_reader, site_data, tem_communication):
         super().__init__()
         self.mrc_reader = mrc_reader
+        self.tem = tem_communication
         self.correlator = CLEMCorrelator(mrc_reader=self.mrc_reader)
         self.site_data = site_data
         self.site_id = self.site_data.site_id
@@ -1888,6 +1596,7 @@ class RegistrationApp(tk.Tk):
     def _load_site_data(self):
         self.site_data = self.mrc_reader.load_latest_from_site(self.site_id)
         self._display_loaded_site_data()
+        self.tem.load_montage_in_serialem(self.site_data.mrc.mrc_path, buffer="A",)
 
     def _resolve_mrc_path(self, mdoc_path, global_info):
         """Locate the montage MRC for an mdoc, robust to stale Windows paths.
@@ -2292,12 +2001,12 @@ class RegistrationApp(tk.Tk):
             self.tree.insert("","end",values=(i+1,m,t))
 
     def _remove_last(self):
-        if self._picks:
-            self._picks.pop()
-            self.clempicker.remove_last_pick()  # ← NEW: Sync with CLEMPicker
-            self._refresh_tree()
-            self._redraw_points()
-            self._status.set(f"Removed last point.\n{len(self._picks)} remaining.")
+        if not self.point_pairs:
+            self.status_var.set("No landmark pairs to remove."); return
+        self.point_pairs.pop()
+        self._update_tree()
+        self._draw_mrc(keep_view=True); self._draw_tiff(keep_view=True)
+        self.status_var.set(f"Removed last point.\n{len(self.point_pairs)} remaining.")
 
     def _clear_points(self):
         self.point_pairs.clear(); self.warped_channels.clear()
@@ -2585,47 +2294,25 @@ class RegistrationApp(tk.Tk):
                     parent=win)
                 return
 
-            # Hand the picker the individual grayscale layers (TEM + every
-            # warped channel) so it can show/hide them via checkboxes and apply
-            # its own per-layer brightness/contrast.  All share the MRC grid, so
-            # the picker downsamples once and keeps coordinates in full-res px.
-            # Also hand it a callback to re-warp any (channel, z) slice onto the
-            # grid plus the z-count, so it can write per-point FOV crops as
-            # registered z-stacks (TEM + all channels x all z) to disk.
-            channel_names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)]
-                             for i in range(C)]
-            n_z = self.tiff_stack.shape[1] if self.tiff_stack is not None else 1
             from clem_target_picking import CLEMPicker
             from clem_dataclasses import SiteDataSummary, MRCSummary, RegistrationSummary
             from clem_tem_communication import TEMComm
 
-            # Set up site_data for CLEMPicker
-            mrc_summary = MRCSummary(
-                image=self.mrc_image,
-                image_height=self.mrc_image.shape[0],
-                image_width=self.mrc_image.shape[1],
-                pixel_spacing_um=self.mrc_pixel_spacing_um,
-                min_x_pixels=0,
-                min_y_pixels=0,
-                coord_field='StageXYZ',
-                tiles=self.mrc_current_pieces
-            )
+            mrc_summary = self.mrc_reader.build_montage_summary(self.mrc_file_path)
+            site_data = SiteDataSummary(site_id='site_001', path='/tmp', mrc=mrc_summary, registration=RegistrationSummary(0), picks=[])
 
-            site_data = SiteDataSummary(
-                site_id='site_001',
-                path='/tmp',
-                mrc=mrc_summary,
-                registration=RegistrationSummary(),
-                picks=[]
-            )
 
-            # Create CLEMPicker
-            clempicker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root, mrc_reader=self.mrc_reader)) 
+            clem_picker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root, mrc_reader=self.mrc_reader)) 
 
-            # Pass it to StagePickerWindow
+            clem_picker.set_output_coord_mode("image", buffer='A')
+
+            channel_names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)] for i in range(len(self.warped_channels))]
+            n_z = (self.site_data.tiff.num_z_slices if self.site_data.tiff is not None else 1)
+
             StagePickerWindow(
                 win,
-                clempicker       = clempicker,           # ← NEW!
+                clem_picker       = clem_picker,           
+                mrc_reader       = self.mrc_reader,
                 mrc_gray         = self.mrc_image,
                 channels_gray    = self.warped_channels,
                 channel_names    = channel_names,
