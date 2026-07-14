@@ -17,13 +17,14 @@ class TEMComm:
         self.output_root = path
         self.mrc_reader = mrc_reader
         self.rotation = rotation
+        self.offline = offline
         self.ACQUIRE = {
                         "View":    sem.View,
                         "Record":  sem.Record,
                         "Search":  sem.Search,
                         "Preview": sem.Preview,
                     }
-        if offline:
+        if self.offline:
             sem.NoMessageBoxOnError()
             print("[INFO] SerialEM is running in offline mode. No commands will be sent to the microscope.")
    
@@ -54,17 +55,22 @@ class TEMComm:
             sem.ChangeItemNote(int(pt_id), pick['pick_id'])
 
     def _load_mrc_in_nav(self, mrc_file_name=None, buffer="0", site_id=None):
-        if sem.ReportIfNavOpen() == 0:
-            self._create_nav_file()
-        
+
         if mrc_file_name is None:
             mrc_file_name = self.mrc_reader.identify_montage_file(site_id=site_id)
 
-        if site_id is not None:
-            sem.ReadOtherFile(0, buffer, os.path.join(self.output_root, site_id, mrc_file_name))
+        idx = int(sem.NavIndexWithHote(Path(mrc_file_name).stem))
+        if idx > 0:
+            sem.LoadOtherMap(idx, "A")
         else:
-            sem.ReadOtherFile(0, buffer, os.path.join(self.output_root, mrc_file_name))
-        sem.NewMap()
+            if sem.ReportIfNavOpen() == 0:
+                self._create_nav_file()
+            
+            if site_id is not None:
+                sem.ReadOtherFile(0, buffer, os.path.join(self.output_root, site_id, mrc_file_name))
+            else:
+                sem.ReadOtherFile(0, buffer, os.path.join(self.output_root, mrc_file_name))
+            sem.NewMap()
         
     def _save_buffer_image(self, site_id=None, acquisition_type=None, label=None):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
@@ -87,12 +93,15 @@ class TEMComm:
         self.prepare_imaging_state(mode=mode,imaging_state=imaging_state)
         self.ACQUIRE[mode]()
         image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = sem.ImageProperties("A")
-        magnification, *_ = self.sem.ReportMag()
+        magnification, *_ = sem.ReportMag()
         return {
                 'img_width_px': int(image_x_pxl),
                 'img_height_px': int(image_y_pxl),
                 'pixel_size_um': pxl_size_nm/1000,
                 'magnification': magnification,
+                'binning': int(binning),
+                'exposure': exposure,
+                'param_set': param_set,
                 }
     
     def get_low_dose_mode_properties(self, mode):
@@ -101,7 +110,7 @@ class TEMComm:
         
         sem.GoToLowDoseArea(mode)
         sem.Delay(1, 'sec')
-        magnification = int(self.sem.ReportMag()[0])
+        magnification = int(sem.ReportMag()[0])
         return magnification
 
 
@@ -134,7 +143,8 @@ class TEMComm:
     def set_eucentricity(self, level):
         self._reset_defocus()
         eucentricity_settings = {'fine': 2, 'rough': 1, 'rough_fine': 3}
-        sem.Eucentricity(eucentricity_settings[level])
+        if self.offline is False:
+            sem.Eucentricity(eucentricity_settings[level])
 
     def report_stage_position(self):
         stage_x, stage_y, stage_z = sem.ReportStageXYZ()
@@ -153,11 +163,13 @@ class TEMComm:
         return imaging_state
 
     def set_low_dose_imaging_state(self):
-        low_dose_mode_state = sem.ReportLowDoseMode()[0]
+        low_dose_mode_state = sem.ReportLowDose()[0]
+
         if not low_dose_mode_state:
             sem.SetLowDoseMode(1)
             sem.Delay(1, 'sec')
-            sem.NormalizeLenses(7)
+            if self.offline is False:
+                sem.NormalizeLenses(7)
             print("[INFO] Switchted to Low Dose Mode.")
         else:
             print("[INFO] Already in Low Dose Mode.")
@@ -170,9 +182,11 @@ class TEMComm:
         if imaging_state in ['LMM', 'grid_square']:
             sem.GoToImagingState(imaging_state)
             sem.Delay(2, 'sec')
-            sem.NormalizeLenses(7)
+            if self.offline is False:
+                sem.NormalizeLenses(7)
             sem.Delay(5, 'sec')
             sem.SetDefocus(float(defocus[imaging_state]))
+            print(f"[InFO] Switchted to {imaging_state} imaging state with defocus set to {defocus[imaging_state]} um.")
         else:
             raise ValueError(f"imaging_state {imaging_state} is not in the list of pre-defined imaging states.")
 
@@ -222,20 +236,20 @@ class TEMComm:
     # Montage control
     # ---------------------------------------------------------------------------
 
-    def acquire_montage(self, fov_um_x, fov_um_y, stage_tilt=0.0, site_id=None, imaging_state=None):
+    def acquire_montage(self, fov_um_x, fov_um_y, stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
         
         self.prepare_imaging_state(mode="View", imaging_state=imaging_state)
-        
-        self.set_eucentricity(level='rough_fine')
+        if eucentricity is True:
+            self.set_eucentricity(level='rough_fine')
 
-        image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = self._readout_image_properties(mode="View")
+        image_properties = self.get_image_properties(mode="View")
 
-        tile_fov_um_x = image_x_pxl * pxl_size_nm/1000
-        tile_fov_um_y = image_y_pxl * pxl_size_nm/1000
+        tile_fov_um_x = image_properties["img_width_px"] * image_properties["pixel_size_um"]
+        tile_fov_um_y = image_properties["img_height_px"] * image_properties["pixel_size_um"]
 
         overlap_fraction = 0.15
-        overlap_pxl_x = int(overlap_fraction * image_x_pxl)
-        overlap_pxl_y = int(overlap_fraction * image_y_pxl)
+        overlap_pxl_x = int(overlap_fraction * image_properties["img_width_px"])
+        overlap_pxl_y = int(overlap_fraction * image_properties["img_height_px"])
 
         step_um_x = tile_fov_um_x * (1.0 - overlap_fraction)
         step_um_y = tile_fov_um_y * (1.0 - overlap_fraction)
@@ -256,10 +270,10 @@ class TEMComm:
         sem.SetMontageParams(int(1),    # useStage = 1 (stage montage, required for hybrid usage of both image shift and stage shift)
                         overlap_pxl_x,    # overlap in x in pxl
                         overlap_pxl_y,    # overlap in y in pxl
-                        int(image_x_pxl),     # set to image size currently in buffer
-                        int(image_y_pxl),     # set to image size currently in buffer
+                        int(image_properties["img_width_px"]),     # set to image size currently in buffer
+                        int(image_properties["img_height_px"]),     # set to image size currently in buffer
                         0,              # skip correlation
-                        int(binning),
+                        int(image_properties["binning"]),
                         -1.0)            # max image shift in micron, only relevant when first argument is 2, otherwise set to -1
 
         sem.Montage()

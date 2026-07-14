@@ -3,7 +3,7 @@ import pickle
 from datetime import datetime
 from typing import Any, Optional
 from dataclasses import dataclass, field
-
+import os
 
 @dataclass
 class Tile:
@@ -78,6 +78,8 @@ class MRCSummary:
     tiles: list[Tile] = field(default_factory=list)
     stage_matrix: Optional[Any] = None          # np 3x3, or None
     stage_fit: Optional[dict] = None            # diagnostics leaf
+    flip_x: Optional[bool] = None
+    flip_y: Optional[bool] = None
 
 
 @dataclass
@@ -100,6 +102,7 @@ class RegistrationSummary:
     flip_x: bool = False
     flip_y: bool = False
     warped_channels: Optional[list] = None       # list[np.ndarray]
+    rotation_deg: Optional[float] = None
 
 
 @dataclass
@@ -159,6 +162,7 @@ class SiteDataSummary:
             flip_x=bool(flip_x),
             flip_y=bool(flip_y),
             warped_channels=r.get("warped_channels"),
+            rotation_deg=rotation_deg,
         )
         return self
 

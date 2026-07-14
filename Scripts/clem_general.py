@@ -98,7 +98,7 @@ class ExecutiveControls:
         input('[ToDO] Move feature suitable for eucentricity alignment to the center of the stage (shift + right click + drag). ENTER')
         
         self.tem.set_eucentricity(level='rough')
-        self.tem.acquire_montage(imaging_state='LMM', fov_um_x=3000.0, fov_um_y=3000.0, stage_tilt=0.0)
+        self.tem.acquire_montage(imaging_state='LMM', fov_um_x=3000.0, fov_um_y=3000.0, stage_tilt=0.0, eucentricity=False)
 
     def run_acquire_position_montages(self):
         
@@ -112,6 +112,7 @@ class ExecutiveControls:
             self.tem.precise_stage_move(stage_x_um=site["stage_x_um"], stage_y_um=site["stage_y_um"], stage_z_um=site["stage_z_um"])
             self.tem.acquire_image(mode='View', imaging_state='grid_square') 
             input("Please move the center of the grid square / lamella to the center of the field of view. ENTER")
+            self.eucentricity_alignment(level='rough_fine')
             stage_x_um, stage_y_um, stage_z_um, stage_tilt = self.tem.report_stage_position()
             updated_site = dict(site)
             updated_site["stage_x_um"] = stage_x_um
@@ -122,9 +123,8 @@ class ExecutiveControls:
         
         for site_number, updated_site in enumerate(updated_sites):
             self.tem.precise_stage_move(stage_x_um = updated_site["stage_x_um"], stage_y_um = updated_site["stage_y_um"], stage_z_um = updated_site["stage_z_um"])
-            self.tem.acquire_montage(stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], position=f"{site['name']}")
+            self.tem.acquire_montage(stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], position=f"{site['name']}", eucentricity=False)
             
-
         self._write_sites_csv(updated_sites, filename='tem_stage_positions_refined.csv')
 
 
@@ -132,17 +132,15 @@ class ExecutiveControls:
 
     def run_clem_alignment(self):
         from clem_ui import RegistrationApp   
-        from clem_general import SiteDataSummary
+        from clem_dataclasses import SiteDataSummary
         tem_stage_positions = self._import_csv_file('tem_stage_positions_refined.csv')
         seen = set()
         for site in tem_stage_positions:
-            
-            ui.mainloop()
             site_id = site["name"]
             if site_id in seen:
                 raise ValueError(f"Dublicate site_id {site_id!r} in CSV file.")
             seen.add(site_id)
-            site_data = SiteDataSummary(site_id=site_id, path=os.path.join(self.mrc_reader.output_root, site_id))
+            site_data = SiteDataSummary(site_id=site_id, path=os.path.join(self.mrc.output_root, site_id))
             site_data.set_acquisition_from_csv_row(site)
             ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data)
             ui.mainloop()

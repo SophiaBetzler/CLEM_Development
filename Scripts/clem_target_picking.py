@@ -15,7 +15,6 @@ from datetime import datetime
 
 @dataclass
 class TileCenter:
-    """Tile center information for coordinate conversion."""
     cx: float
     cy: float
     sx: float

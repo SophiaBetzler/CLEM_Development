@@ -1540,30 +1540,31 @@ class RegistrationApp(tk.Tk):
 
     def _display_loaded_site_data(self):            
         if self.site_data.mrc is not None:
-            self._display_loaded_mrc_data()
+            self._display_loaded_mrc_data(self.site_data.mrc)
         if self.site_data.tiff is not None:
-            self._display_loaded_tiff_data()
+            self._display_loaded_tiff_data(self.site_data.tiff)
 
     def _display_loaded_mrc_data(self, data):
-        self.mrc_file_path = os.fspath(data["mrc_path"])
-        self.mrc_section_map = data["section_pieces"]
-        self.mrc_montage_cache = dict(data["montages"])
-        self.mrc_img_hw = data["img_hw"]
-        self.mrc_feather_px = data["feather_px"]
-        self.mrc_pixel_spacing_um = data["pixel_spacing_um"]
+        self.mrc_file_path = os.fspath(data.mrc_path)
+        self.mrc_montage_cache = {data.section: data.image}
+        self.mrc_img_hw = (data.image_height, data.image_width)
+        self.mrc_feather_px = data.feather_pixels
+        self.mrc_pixel_spacing_um = data.pixel_spacing_um
         self.mrc_is_montage = True
+
+        self.mrc_section_map = {
+            data.section: data.tiles
+        }
 
         sections = sorted(self.mrc_section_map.keys())
         self.mrc_n_sections = len(sections)
 
         self.mrc_mont_canvas = {
-            sec: (img.shape[1], img.shape[0])
-            for sec, img in self.mrc_montage_cache.items()
+            data.section: (data.image.shape[1], data.image.shape[0])
         }
 
         self.mrc_mont_info = {
-            sec: f"{len(self.mrc_section_map.get(sec, []))} tiles"
-            for sec in sections
+            data.section: f"{len(data.tiles)} tiles"
         }
 
         self.montage_spin.config(to=max(0, self.mrc_n_sections - 1))
@@ -1577,7 +1578,7 @@ class RegistrationApp(tk.Tk):
         self._on_montage_changed()
     
     def _display_loaded_tiff_data(self, data):
-        self.tiff_stack = data["tiff_stack"]
+        self.tiff_stack = data.stack_czyx
         self._tiff_img_dirty = True
 
         C, Z = self.tiff_stack.shape[:2]
@@ -1591,9 +1592,7 @@ class RegistrationApp(tk.Tk):
         self.flip_y.set(False)
 
         self.bc_tiff_panel.build(C, self._on_bc_tiff)
-        self.tiff_info_var.set(
-            os.path.basename(os.fspath(data["ome_path"])) + "  " + data["tiff_info"]
-        )
+        self.tiff_info_var.set( os.path.basename(os.fspath(data.ome_path)) + "  " + data.info)
 
         self._draw_tiff()
 
@@ -2597,7 +2596,7 @@ class RegistrationApp(tk.Tk):
                              for i in range(C)]
             n_z = self.tiff_stack.shape[1] if self.tiff_stack is not None else 1
             from clem_target_picking import CLEMPicker
-            from clem_dataclasses import SiteDataSummary, MRCSummary, RegistrationInfo
+            from clem_dataclasses import SiteDataSummary, MRCSummary, RegistrationSummary
             from clem_tem_communication import TEMComm
 
             # Set up site_data for CLEMPicker
@@ -2616,7 +2615,7 @@ class RegistrationApp(tk.Tk):
                 site_id='site_001',
                 path='/tmp',
                 mrc=mrc_summary,
-                registration=RegistrationInfo(),
+                registration=RegistrationSummary(),
                 picks=[]
             )
 

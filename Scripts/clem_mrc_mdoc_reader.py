@@ -457,7 +457,7 @@ class MRCReader:
     # Determine stage rotation vs montage
     # ------------------------------------------------------------------ #
 
-    def _fit_pixel_to_stage_rotation_matrix(self, pieces_edited):
+    def _fit_pixel_to_stage_rotation_matrix(self,tiles):
         pts = [t for t in tiles if t.pixel_x_um is not None and t.stage_x_um is not None]
         if len(pts) < 3:
             return None, {"n": len(pts), "message": "Not enough points to fit rotation."}
@@ -666,9 +666,9 @@ class MRCReader:
             st = self._piece_stage_xy_position(p)         # {"stage_x_um","stage_y_um"} | None
             sz = self._piece_stage_z_position(p)          # {"stage_z_um"} | None
             tiles.append(Tile(z_index=p.get("ZValue"),
-                            stage_z_um=(sz or {}).get("stage_z_um"),
-                            pixel_x_um=(px or {}).get("x_um"),
-                            pixel_y_um=(px or {}).get("y_um"),
+                            stage_z_um=sz,
+                            pixel_x_um=(px or {}).get("piece_x_um"),
+                            pixel_y_um=(px or {}).get("piece_y_um"),
                             stage_x_um=(st or {}).get("stage_x_um"),
                             stage_y_um=(st or {}).get("stage_y_um"),
                         ))
@@ -697,3 +697,5 @@ class MRCReader:
             self.load_mrc_montage(mrc_filepath=mrc_filepath) 
         self.show(mrc_filepath=mrc_filepath, contrast_percentiles=(1.0, 99.))
         return self.build_montage_summary(mrc_filepath = mrc_filepath)
+    
+
