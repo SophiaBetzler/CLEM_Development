@@ -820,12 +820,12 @@ class StagePickerWindow(tk.Toplevel):
             for i, group in enumerate(groups):
                 self._status.set(f"Generating xg1 for group {i+1}/{len(groups)}...")
                 self.update_idletasks()
-                
-                xg1_path = self.clem_picker.generate_xg1_file(
-                    group=group,
-                    record_mag=record_mag,
-                    output_folder=output_folder
-                )
+                self.clem_picker.run_create_groups_for_pacetomo(self, group: TargetGroup, 
+                              montage_mag: int = 2000,
+                              record_mag: int = 40000,
+                              view_mag: int = 15000,
+                              calibration_calculator = None,
+                              output_folder: Optional[str] = None)
                 xg1_files.append(xg1_path)
             
             # ─────────────────────────────────────────────────────────
@@ -1057,25 +1057,35 @@ class StagePickerWindow(tk.Toplevel):
         return "+".join(parts) if parts else "none"
 
     def _on_click(self, event):
-        if event.button != 1 or event.inaxes is not self._H or _shift_held(event):
-            return
-        if event.xdata is None:
+        if (
+            event.button != 1
+            or event.inaxes is not self._ax
+            or _shift_held(event)
+        ):
             return
 
+        if event.xdata is None or event.ydata is None:
+            return
+
+        dx = event.xdata
+        dy = event.ydata
+
+        # Convert display coordinates back to true montage coordinates.
         px = _unflip_x(dx, self._W)
         py = _unflip_y(dy, self._H)
 
         pick = self.clem_picker.add_pick_from_pixel(px, py)
-
         self._picks.append(pick)
-        
+
         self._refresh_tree()
         self._redraw_points()
+
         self._status.set(
             f"Point #{len(self._picks)}\n"
             f"Stage X:  {pick.stage_x_um:.3f} um\n"
             f"Stage Y:  {pick.stage_y_um:.3f} um\n\n"
-            f"Pixel:  ({pick.pixel_x_um:.0f}, {pick.pixel_y_um:.0f})")
+            f"Pixel:  ({pick.pixel_x_um:.0f}, {pick.pixel_y_um:.0f})"
+        )
 
     def _redraw_points(self):
         for a in self._pt_artists:
@@ -1132,7 +1142,7 @@ class StagePickerWindow(tk.Toplevel):
                                    parent=self)
             return
 
-        fov = self._fov_width_um()
+        fov = 1.0
         if fov == "bad":
             messagebox.showwarning(
                 "FOV width",
@@ -1596,7 +1606,7 @@ class RegistrationApp(tk.Tk):
     def _load_site_data(self):
         self.site_data = self.mrc_reader.load_latest_from_site(self.site_id)
         self._display_loaded_site_data()
-        self.tem.load_montage_in_serialem(self.site_data.mrc.mrc_path, buffer="A",)
+        self.tem.load_montage_in_serialem(self.site_data.mrc.mrc_path, )
 
     def _resolve_mrc_path(self, mdoc_path, global_info):
         """Locate the montage MRC for an mdoc, robust to stale Windows paths.

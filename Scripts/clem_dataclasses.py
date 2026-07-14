@@ -48,6 +48,12 @@ class Pick:
             return (self.refined_stage_x, self.refined_stage_y, self.refined_stage_z)
         else:
             return (self.stage_x_um, self.stage_y_um, self.stage_z_um)
+        
+    def get_image_shift(self) -> tuple[float, float]:
+        return (
+            float(self.image_shift_x or 0.0),
+            float(self.image_shift_y or 0.0),
+        )
 
 
 @dataclass

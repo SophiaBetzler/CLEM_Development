@@ -142,16 +142,12 @@ class ExecutiveControls:
             ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data, tem_communication=self.tem)
             ui.mainloop()
 
-
-
-        #     montage_summary = self.mrc.run_montage_loader_and_create_summary(os.path.join(self.path, montage_file))
-        #     from clem_target_picking import CLEMPicker
-        #     target_picker = CLEMPicker(montage_settings=montage_summary, tem_communication=self.tem)
-        #     target_picker.run_auto_picker()
-
             site_data.save()                    # -> <folder>/<site_id>_<timestamp>.pkl
             self.site_summaries[site_id] = site
 
         return self.site_summaries
+
+    def run_clem_fine_alignment(self):
+        self.mrc.crop
 
 

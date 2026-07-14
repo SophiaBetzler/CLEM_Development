@@ -58,7 +58,7 @@ class TEMComm:
             sem.SetItemImageShift(nav_idx, shift_x, shift_y)
         return nav_idx
 
-    def load_montage_in_serialem(self, mrc_file_name=None, buffer="0", site_id=None):
+    def load_montage_in_serialem(self, mrc_file_name=None, site_id=None):
 
         if mrc_file_name is None:
             mrc_file_name = self.mrc_reader.identify_montage_file(site_id=site_id)
@@ -71,13 +71,16 @@ class TEMComm:
             mrc_path = os.path.join(self.output_root, mrc_file_name)
 
 
-        idx = int(sem.NavIndexWithNote(Path(mrc_path).stem))
+        idx =int(sem.NavIndexWithNote(Path(mrc_path).stem))
+
         if idx > 0:
             sem.LoadOtherMap(idx, "A")
         else:
             if sem.ReportIfNavOpen() == 0:
                 self._create_nav_file()
+            
             sem.OpenOldFile(mrc_path)
+            sem.ReadMontage(0)
             sem.NewMap()
             sem.CloseFile()
         

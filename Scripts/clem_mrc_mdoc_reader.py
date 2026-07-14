@@ -419,12 +419,19 @@ class MRCReader:
         cw = max(2, int(round(fov_um / self.pixel_spacing_um)))
         return cw
         
-
     def write_mrc_crops(self, picks, mrc_full, fov_um, output_root, prefix='crop'):
         cw = self._fov_in_px(fov_um)
         written = []
         for pick in picks:
             crop = self._crop_centered(mrc_full, pick.pixel_x_um, pick.pixel_y_um, cw)
+
+            saturated = crop >= 1.0
+            valid = crop[~saturated]
+            mean = float(valid.mean()) if valid.size else 0.0
+            crop[saturated] = mean
+
+            pad = ((max(0, -y0_des), max(0, y1_des - self.image.shape[0])))
+
             out = f"{output_root}_{prefix}_{pick.pick_id}.mrc"
             with mrcfile.new(out, overwrite=True) as mrc:
                 mrc.set_data(crop)
@@ -446,7 +453,7 @@ class MRCReader:
                 for pi, pick in enumerate(picks):
                     stacks[pi][z, c+1] = self._crop_centered(full, pick.pixel_x_um, pick.pixel_y_um, cw)
         res = (1.0 / self.pixel_spacing_um) if self.pixel_spacing_um > 0 else 1.0
-        labels = (["TEM"]+[f"Ch{c}" for c in arange(n_channels)]) * n_z
+        labels = (["TEM"]+[f"Ch{c}" for c in range(n_channels)]) * n_z
         written = []
         for pi, pick in enumerate(picks):
             out = f"{output_root}{prefix}_{pick.pick_id}.tif"

@@ -280,7 +280,7 @@ class CLEMPicker:
 
             group_id = str(len(groups) + 1)
             member_picks = [picks[i] for i in members]
-            tracking_target = self._tracking_target_for(member_picks, picks, lone_offset_um, 
+            tracking_target = self.create_tracking_target_for_group(member_picks, picks, lone_offset_um, 
                                                        min_seperation_um, group_id)
             
             groups.append(TargetGroup(group_id=group_id, tracking=tracking_target, picks=member_picks))
@@ -354,9 +354,7 @@ class CLEMPicker:
     # Reference Image Extraction
     # ════════════════════════════════════════════════════════════════════════
 
-    def extract_reference_crops_for_group(self, group: TargetGroup, 
-                                        crop_fov_um: float = 5.0,
-                                        output_subfolder: str = 'references') -> Dict[str, str]:
+    def extract_reference_crops_for_group(self, group: TargetGroup, crop_fov_um: float = 5.0, output_subfolder: str = 'references') -> Dict[str, str]:
         
         print(f"\n[INFO] Extracting reference crops for group {group.group_id}...")
         
@@ -493,9 +491,7 @@ class CLEMPicker:
     # SECTION 8: Image Shift Calculation
     # ════════════════════════════════════════════════════════════════════════
 
-    def calculate_image_shift_for_pick(self, pick: Pick, target_pick: Pick,
-                                      target_magnification: int,
-                                      calibration_calculator) -> Pick:
+    def calculate_image_shift_for_pick(self, pick: Pick, target_pick: Pick, target_magnification: int, calibration_calculator) -> Pick:
 
         if pick.pick_id == target_pick.pick_id:
             print(f"  {pick.pick_id} (tracking): no shift needed")
@@ -509,24 +505,21 @@ class CLEMPicker:
         offset_x_um = offset_x_px * self.pixel_spacing_um
         offset_y_um = offset_y_px * self.pixel_spacing_um
 
-        shift_x, shift_y = calibration_calculator.apply_matrix_to_shift(offset_x_um, offset_y_um,target_magnification)
+        shift_x, shift_y = calibration_calculator.apply_matrix_to_shift(offset_x_um, offset_y_um, target_magnification)
 
         pick.image_shift_x = shift_x
         pick.image_shift_y = shift_y
         
-        print(f"  {pick.pick_id}: shift=({shift_x:+.6f}, {shift_y:+.6f}) µm")
+        print(f"{pick.pick_id}: shift=({shift_x:+.6f}, {shift_y:+.6f}) µm")
         
         return pick
 
-    def calculate_image_shifts_for_group(self, group: TargetGroup, 
-                                        target_magnification: int,
-                                        calibration_calculator) -> TargetGroup:
+    def calculate_image_shifts_for_group(self, group: TargetGroup, target_magnification: int, calibration_calculator) -> TargetGroup:
 
         print(f"\n[INFO] Calculating image shifts for group {group.group_id}...")
         
         for pick in group.picks:
-            self.calculate_image_shift_for_pick(pick, group.tracking, 
-                                               target_magnification, calibration_calculator)
+            self.calculate_image_shift_for_pick(pick, group.tracking, target_magnification, calibration_calculator)
         
         return group
 
@@ -655,69 +648,30 @@ class CLEMPicker:
     # SECTION 11: Workflow Orchestration
     # ════════════════════════════════════════════════════════════════════════
 
-    def process_group_complete(self, group: TargetGroup, 
-                              montage_mag: int = 2000,
-                              record_mag: int = 40000,
-                              view_mag: int = 15000,
+    def run_create_groups_for_pacetomo(self, group: TargetGroup, crop_fov = 2.0,
                               calibration_calculator = None,
                               output_folder: Optional[str] = None) -> Dict:
-        """
-        Complete workflow for processing one group.
-        
-        Steps:
-        1. Extract reference crops for non-targets
-        2. Refine target stage position
-        3. Calculate image shifts for all picks
-        4. Generate xg1 file
-        5. Create navigator entries
-        
-        Parameters
-        ----------
-        group : TargetGroup
-            Group to process
-        montage_mag : int
-            Montage magnification
-        record_mag : int
-            Record magnification
-        view_mag : int
-            View magnification
-        calibration_calculator : CalibratedImageShiftCalculator
-            Calibration for image shifts
-        output_folder : str
-            Main project folder for xg1 output
-        
-        Returns
-        -------
-        results : dict
-            Summary of processing results
-        """
-        
+
         print(f"\n{'='*70}")
         print(f"Processing Group {group.group_id}")
         print(f"{'='*70}")
-        
-        # Step 1: Extract reference crops
+
         ref_crops = self.extract_reference_crops_for_group(group)
         
-        # Step 2: Refine target
-        target = self.refine_target_stage_position(
-            group.tracking, montage_mag, record_mag, view_mag
-        )
+        target = self.refine_target_stage_position(group.tracking)
         
         # Step 3: Calculate image shifts
         if calibration_calculator is not None:
-            self.calculate_image_shifts_for_group(
-                group, record_mag, calibration_calculator
-            )
+            self.calculate_image_shifts_for_group(group,calibration_calculator)
         
         # Step 4: Generate xg1
         if output_folder is None:
             output_folder = self.site_output_root
         
-        xg1_path = self.generate_xg1_file(group, record_mag, output_folder)
+        xg1_path = self.generate_xg1_file(group, output_folder)
         
         # Step 5: Create navigator
-        nav_indices = self.add_group_to_navigator(group, record_mag)
+        nav_indices = self.add_group_to_navigator(group, g)
         
         return {
             'group_id': group.group_id,
