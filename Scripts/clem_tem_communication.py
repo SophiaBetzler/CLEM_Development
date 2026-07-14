@@ -42,17 +42,21 @@ class TEMComm:
         nav_file = os.path.join(self.output_root, "nav_file" + "_" + timestamp + '.nav')
         sem.OpenNavigator(nav_file)
 
-    def add_stage_pos_to_nav(self, picks):
-        if sem.ReportIfNavOpen() == 0:
-            self._create_nav_file()
-        _, _, default_stage_z_um = sem.ReportStageXYZ()
-        pt_id = int(sem.GetUniqueNavID())
-        for pick in picks:
-            if pick['stage_z_um'] is not None:
-                sem.AddStagePosAsNavPoint(pick['stage_x_um'], pick['stage_y_um'], pick['stage_z_um'], pt_id)
-            else:
-                sem.AddStagePosAsNavPoint(pick['stage_x_um'], pick['stage_y_um'], default_stage_z_um, pt_id)
-            sem.ChangeItemNote(int(pt_id), pick['pick_id'])
+
+    def add_nav_point(self, pick, label, output_coord_mode):
+        stage_x, stage_y, stage_z = pick.get_stage_position()
+        group_id = sem.GetUniqueNavID()
+        if output_coord_mode == "image":
+            z = stage_z if stage_z is not None else -999
+            nav_idx = int(sem.AddImagePosAsNavPoint(self.buffer, pick.pixel_x_um, pick.pixel_y_um, z, group_id, 1))
+        else:
+            z = stage_z if stage_z is not None else -999
+            nav_idx = int(sem.AddStagePosAsNavPoint(stage_x, stage_y, z, group_id, 1))
+        sem.ChangeItemLabel(nav_idx, label)
+        shift_x, shift_y = pick.get_image_shift()
+        if shift_x or shift_y:
+            sem.SetItemImageShift(nav_idx, shift_x, shift_y)
+        return nav_idx
 
     def _load_mrc_in_nav(self, mrc_file_name=None, buffer="0", site_id=None):
 
@@ -231,16 +235,17 @@ class TEMComm:
             sem.Delay(1, 'sec')
             sem.MoveStage(backlashXY, backlashXY, 0.0)
 
-
     # ---------------------------------------------------------------------------
     # Montage control
     # ---------------------------------------------------------------------------
 
     def acquire_montage(self, fov_um_x, fov_um_y, stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
         
+        
         self.prepare_imaging_state(mode="View", imaging_state=imaging_state)
         if eucentricity is True:
             self.set_eucentricity(level='rough_fine')
+        sem.SetImageShift(0.0, 0.0)
 
         image_properties = self.get_image_properties(mode="View")
 
@@ -384,8 +389,4 @@ class TEMComm:
                 "supply a default before AddStagePosAsNavPoint.")
         return rows
     
-
-    def run_picks_visualization(self, mrc_file_name, picks, site_id=None):
-        self._load_mrc_in_nav(mrc_file_name=mrc_file_name,buffer='A', site_id=site_id)
-        self.add_stage_pos_to_nav(picks=picks)
 

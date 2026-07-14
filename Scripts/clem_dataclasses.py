@@ -102,7 +102,7 @@ class RegistrationSummary:
     flip_x: bool = False
     flip_y: bool = False
     warped_channels: Optional[list] = None       # list[np.ndarray]
-    rotation_deg: Optional[float] = None
+    rotation_deg: Optional[float] = 0.0
 
 
 @dataclass
@@ -151,18 +151,19 @@ class SiteDataSummary:
         return self
 
     # -------- Registration: from the correlator result dict ---------------- #
-    def set_registration(self, correlator_result, transform_type,
-                         flip_x=False, flip_y=False):
+    def set_registration(self, correlator_result, transform_type, flip_x=False, flip_y=False):
         r = correlator_result
+        fit_info = r.get("fit_info") or {}
+
         self.registration = RegistrationSummary(
             transform_type=transform_type,
             transform_matrix=r.get("transform"),
-            fit_info=r.get("fit_info"),
+            fit_info=fit_info,
             num_point_pairs=r.get("n_pairs"),
             flip_x=bool(flip_x),
             flip_y=bool(flip_y),
             warped_channels=r.get("warped_channels"),
-            rotation_deg=rotation_deg,
+            rotation_deg=fit_info.get("rotation_deg", 0.0),
         )
         return self
 

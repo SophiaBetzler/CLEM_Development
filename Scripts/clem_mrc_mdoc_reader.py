@@ -2,6 +2,7 @@
 import re
 import os
 import mrcfile
+import tifffile
 import numpy as np
 from pathlib import Path
 from clem_dataclasses import *
@@ -405,6 +406,65 @@ class MRCReader:
 
         print(f"[INFO] Parsed {len(pieces)} edited pieces, {len(mont_sections)} mont section(s).")
         return global_info, pieces, mont_sections
+
+    # ------------------------------------------------------------------ #
+    # Cropping tools
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _crop_centered(full, px, py, cw, fill=0.0):
+        H, W = full.shape
+        half = cw // 2
+        x0, y0 = int(round(px)) - half, int(round(py)) - half
+        out = np.full((cw, cw), fill, dtype = np.float32)
+        sx0, sy0 = max(0, x0), max(0, y0)
+        sx1, sy1 = min(W, x0+cw), min(H, y0+cw)
+        if sx1 > sx0 and sy1 > sy0:
+            out[sy0-y0: sy1-y0, sx0-x0:sx1-x0] = full[sy0:sy1, sx0:sx1]
+
+
+    def _fov_in_px(self, fov_um):
+        cw = max(2, int(round(fov_um / self.pixel_spacing_um)))
+        
+
+    def write_mrc_crops(self, picks, mrc_full, fov_um, output_root, prefix='crop'):
+        cw = self._fov_in_px(fov_um)
+        written = []
+        for pick in picks:
+            crop = self._crop_centered(mrc_full, pick.pixel_x_um, pick.pixel_y_um, cw)
+            out = f"{output_root}_{prefix}_{pick.pick_id}.mrc"
+            with mrcfile.new(out, overwrite=True) as mrc:
+                mrc.set_data(crop)
+                mrc.voxel_size = self.pixel_spacing_um * 10000
+                mrc.update_header_from_data()
+            written.append(os.path.basename(out))
+        return written
+    
+    def write_multichannel_crops(self, picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root, prefix=""):
+        cw = self._fov_in_px(fov_um)
+        stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), dtype=np.float32) for _ in picks]
+        for pi, pick in enumerate(picks):
+            crop = self._crop_centered(mrc_full, pick.pixel_x_um, pick.pixel_y_um, cw)
+            for z in range(n_z):
+                stacks[pi][z, 0] = crop
+        for c in range(n_channels):
+            for z in range(n_z):
+                full = warp_slice(c, z)
+                for pi, pick in enumerate(picks):
+                    stacks[pi][z, c+1] = self._crop_centered(full, pick.pixel_x_um, pick.pixel_y_um, cw)
+        res = (1.0 / self.pixel_spacing_um) if self.pixel_spacing_um > 0 else 1.0
+        labels = (["TEM"]+[f"Ch{c}" for c in range(n_channels)]) * n_z
+        written = []
+        for pi, pick in enumerate(picks):
+            out = f"{output_root}{prefix}_{pick.pick_id}.tif"
+            tifffile.imwrite(out, stacks[pi], imagej=True, resolution=(res, res), metadata={"axes": "ZCYX", "unit": "um", "Labels": labels})
+            written.append(os.path.basename(out))
+        return written
+
+    def write_fov_crops(self, picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root):
+        tif = self.write_multichannel_crops(picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root)
+        mrc = self.write_mrc_crops(picks, mrc_full, fov_um, output_root)
+        return {"tif": tif, "mrc": mrc}
 
     # ------------------------------------------------------------------ #
     # Montage assembly

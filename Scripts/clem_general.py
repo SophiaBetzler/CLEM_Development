@@ -127,9 +127,6 @@ class ExecutiveControls:
             
         self._write_sites_csv(updated_sites, filename='tem_stage_positions_refined.csv')
 
-
-### I think the run_clem_alignment function should be changed anyways to call the overlay tool.
-
     def run_clem_alignment(self):
         from clem_ui import RegistrationApp   
         from clem_dataclasses import SiteDataSummary
@@ -144,6 +141,7 @@ class ExecutiveControls:
             site_data.set_acquisition_from_csv_row(site)
             ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data)
             ui.mainloop()
+            
 
 
         #     montage_summary = self.mrc.run_montage_loader_and_create_summary(os.path.join(self.path, montage_file))

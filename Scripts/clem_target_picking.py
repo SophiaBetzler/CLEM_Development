@@ -36,30 +36,27 @@ class CLEMPicker:
         self.min_x_pixels, self.min_y_pixels = mrc_summary.min_x_pixels, mrc_summary.min_y_pixels
         self.image = mrc_summary.image
         self.mrc = mrc_summary
+        self.output_coord_mode = "stage" # or "image"
+        self.nav_map_buffer = "A"
 
         self.site_id = site_data.site_id
         self.site_output_root = site_data.path
         self.tem = tem_communication
         self.H, self.W = self.image.shape[:2]
         
-        if site_data.registration:
-            self.flip_x = site_data.registration.flip_x
-            self.flip_y = site_data.registration.flip_y
-            theta = np.deg2rad(site_data.registration.rotation_deg)
-        else:
-            self.flip_x = False
-            self.flip_y = False
-            theta = 0.0
-        
+        self.flip_x = bool(getattr(mrc_summary, 'flip_x', False))
+        self.flip_y = bool(getattr(mrc_summary, 'flip_y', False))
+
+        theta = np.deg2rad(getattr(mrc_summary, 'rotation_deg', 0.0))
         self.cos, self.sin = np.cos(theta), np.sin(theta)
 
         self.tiles = self._build_lookup()
 
-        if site_data.registration and site_data.registration.transform_matrix is not None:
-            self._M = np.asarray(site_data.registration.transform_matrix.params, dtype=float)
+        if mrc_summary.stage_matrix is not None:
+            self._M = np.asarray(mrc_summary.stage_matrix, dtype=float)
         else:
             self._M = None
-
+             
     # ════════════════════════════════════════════════════════════════════════
     # Helper and Coordinate Conversion Methods
     # ════════════════════════════════════════════════════════════════════════
@@ -120,6 +117,13 @@ class CLEMPicker:
             stage_y = tile.sy + (self.sin * dx_um + self.cos * dy_um)
         
         return stage_x, stage_y, tile
+    
+    def set_output_coord_mode(self, mode: str, buffer=None):
+        if mode not in ("stage", "image"):
+            raise ValueError("mode must be 'stage' or 'image'")
+        self.output_coord_mode = mode
+        if buffer is not None:
+            self.nav_map_buffer = buffer
 
     # ════════════════════════════════════════════════════════════════════════
     # Pick Creation and Management
@@ -175,6 +179,22 @@ class CLEMPicker:
     def get_all_picks(self) -> List[Pick]:
         """Get all picks."""
         return self.site_data.picks.copy()
+    
+    def _add_nav_point(self, pick, group_id, label):
+        nav_idx = self.tem.add_nav_point(self, pick=pick, group_id=group_id, label=label, output_coord_mode = self.output_coord_mode)
+        return nav_idx
+    
+    def add_group_to_navigator(self, group: TargetGroup, record_mag: int) -> Dict[str, int]:
+
+        target = group.tracking
+        nav_indices = {target.pick_id: self.tem.add_nav_point(pick=target, label=f"001_{target.pick_id}")}
+        for i, pick in enumerate(group.picks):
+            if pick.pick_id == target.pick_id:
+                continue
+            nav_indices[pick.pick_id] = self.tem.add_nav_point(pick=pick, label=f"{str(i+2).zfill(3)}_{pick.pick_id}")
+        
+        return nav_indices
+
 
     # ════════════════════════════════════════════════════════════════════════
     # Image Cropping and Preprocessing
@@ -630,84 +650,6 @@ class CLEMPicker:
         
         print(f"  Saved: {xg1_path}")
         return xg1_path
-
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 10: Navigator Creation
-    # ════════════════════════════════════════════════════════════════════════
-
-    def add_group_to_navigator(self, group: TargetGroup, record_mag: int) -> Dict[str, int]:
-        """
-        Create navigator entries for group using Pick objects.
-        
-        Parameters
-        ----------
-        group : TargetGroup
-            Group with refined picks
-        record_mag : int
-            Record magnification
-        
-        Returns
-        -------
-        nav_indices : dict
-            {pick_id: nav_index, ...}
-        """
-        
-        import serialem as sem
-        
-        print(f"\n[INFO] Creating navigator entries for {group.group_id}...")
-        
-        target = group.tracking
-        nav_indices = {}
-        
-        # ─────────────────────────────────────────────────────────────────
-        # Add tracking target (001)
-        # ─────────────────────────────────────────────────────────────────
-        
-        stage_x, stage_y, stage_z = target.get_stage_position()
-        self.tem.precise_stage_move(stage_x, stage_y, stage_z)
-        
-        # Add nav item
-        nav_idx = int(sem.NewNavItem(sem.Point(), 0))
-        sem.ChangeItemLabel(nav_idx, f"001_{target.pick_id}")
-        
-        # Set stage position
-        sem.SetItemStagePos(nav_idx, stage_x, stage_y, stage_z)
-        
-        # Set image shift
-        shift_x, shift_y = target.get_image_shift()
-        sem.SetItemImageShift(nav_idx, shift_x, shift_y)
-        
-        nav_indices[target.pick_id] = nav_idx
-        print(f"  {target.pick_id} (tracking): nav_idx={nav_idx}")
-        
-        # ─────────────────────────────────────────────────────────────────
-        # Add other picks
-        # ─────────────────────────────────────────────────────────────────
-        
-        for i, pick in enumerate(group.picks):
-            if pick.pick_id == target.pick_id:
-                continue
-            
-            target_num = str(i + 2).zfill(3)
-            
-            stage_x, stage_y, stage_z = pick.get_stage_position()
-            self.tem.precise_stage_move(stage_x, stage_y, stage_z)
-            
-            # Add nav item
-            nav_idx = int(sem.NewNavItem(sem.Point(), 0))
-            sem.ChangeItemLabel(nav_idx, f"{target_num}_{pick.pick_id}")
-            
-            # Set stage position
-            sem.SetItemStagePos(nav_idx, stage_x, stage_y, stage_z)
-            
-            # Set image shift
-            shift_x, shift_y = pick.get_image_shift()
-            sem.SetItemImageShift(nav_idx, shift_x, shift_y)
-            
-            nav_indices[pick.pick_id] = nav_idx
-            print(f"  {pick.pick_id}: nav_idx={nav_idx}")
-        
-        return nav_indices
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 11: Workflow Orchestration

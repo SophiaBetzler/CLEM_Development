@@ -2620,7 +2620,7 @@ class RegistrationApp(tk.Tk):
             )
 
             # Create CLEMPicker
-            clempicker = CLEMPicker(site_data, TEMComm(offline=True))
+            clempicker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root, mrc_reader=self.mrc_reader)) 
 
             # Pass it to StagePickerWindow
             StagePickerWindow(
