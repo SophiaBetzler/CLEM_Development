@@ -403,41 +403,74 @@ class MRCReader:
     # ------------------------------------------------------------------ #
 
     @staticmethod
+    def _coerce_scalar(value, name):
+        if value is None:
+            raise ValueError(f"{name} must not be None")
+        if isinstance(value, (list, tuple, np.ndarray)):
+            if len(value) != 1:
+                raise ValueError(f"{name} must be a scalar-like value")
+            value = value[0]
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"{name} must be numeric, got {type(value).__name__}") from exc
+
+    @staticmethod
     def _crop_centered(full, px, py, cw, fill=0.0):
         H, W = full.shape
+        px = MRCReader._coerce_scalar(px, "px")
+        py = MRCReader._coerce_scalar(py, "py")
         half = cw // 2
         x0, y0 = int(round(px)) - half, int(round(py)) - half
-        out = np.full((cw, cw), fill, dtype = np.float32)
+        out = np.full((cw, cw), fill, dtype=np.float32)
         sx0, sy0 = max(0, x0), max(0, y0)
-        sx1, sy1 = min(W, x0+cw), min(H, y0+cw)
+        sx1, sy1 = min(W, x0 + cw), min(H, y0 + cw)
         if sx1 > sx0 and sy1 > sy0:
-            out[sy0-y0: sy1-y0, sx0-x0:sx1-x0] = full[sy0:sy1, sx0:sx1]
+            out[sy0 - y0: sy1 - y0, sx0 - x0: sx1 - x0] = full[sy0:sy1, sx0:sx1]
 
         return out
 
     def _fov_in_px(self, fov_um):
-        cw = max(2, int(round(fov_um / self.pixel_spacing_um)))
+        fov_um = self._coerce_scalar(fov_um, "fov_um")
+        spacing_um = self._coerce_scalar(self.pixel_spacing_um, "pixel_spacing_um")
+        if spacing_um <= 0:
+            raise ValueError("pixel_spacing_um must be positive")
+        cw = max(2, int(round(fov_um / spacing_um)))
         return cw
         
-    def write_mrc_crops(self, picks, mrc_full, fov_um, output_root, prefix='crop'):
-        cw = self._fov_in_px(fov_um)
-        written = []
-        for pick in picks:
-            crop = self._crop_centered(mrc_full, pick.pixel_x_um, pick.pixel_y_um, cw)
-
+    def write_mrc_crops(self, mrc_full, fov_um, output_root, picks=None, center_px=None, prefix='crop', skip_pick_id=None):
+        def correct_image(crop):
             saturated = crop >= 1.0
             valid = crop[~saturated]
             mean = float(valid.mean()) if valid.size else 0.0
             crop[saturated] = mean
+            return crop
+        
+        cw = self._fov_in_px(fov_um)
+        written = []
+        if picks is not None:
+            for pick in picks:
+                if skip_pick_id is not None and pick.pick_id == skip_pick_id:
+                    continue
+                crop = self._crop_centered(mrc_full, pick.pixel_x_um, pick.pixel_y_um, cw)
+                crop = correct_image(crop)
 
-            pad = ((max(0, -y0_des), max(0, y1_des - self.image.shape[0])))
+                out = f"{output_root}_{prefix}_{pick.pick_id}.mrc"
+                
+        elif center_px is not None:
+            crop = self._crop_centered(mrc_full, center_px[0], center_px[1], cw)
+            crop = correct_image(crop)
+            out = f"{output_root}_{prefix}_center.mrc"
+        
+        else:
+            raise ValueError("Either picks or center_px most be defined.")
 
-            out = f"{output_root}_{prefix}_{pick.pick_id}.mrc"
-            with mrcfile.new(out, overwrite=True) as mrc:
+        with mrcfile.new(out, overwrite=True) as mrc:
                 mrc.set_data(crop)
                 mrc.voxel_size = self.pixel_spacing_um * 10000
                 mrc.update_header_from_data()
-            written.append(os.path.basename(out))
+                written.append(os.path.basename(out))
+
         return written
     
     def write_multichannel_crops(self, picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root, prefix=""):

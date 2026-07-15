@@ -36,12 +36,13 @@ class CLEMPicker:
         self.min_x_pixels, self.min_y_pixels = mrc_summary.min_x_pixels, mrc_summary.min_y_pixels
         self.image = mrc_summary.image
         self.mrc = mrc_summary
-        self.output_coord_mode = "stage" # or "image"
+        self.output_coord_mode = "image" # or "stage"
         self.nav_map_buffer = "A"
 
         self.site_id = site_data.site_id
         self.site_output_root = site_data.path
         self.tem = tem_communication
+        self.mrc_reader = self.tem.mrc_reader
         self.H, self.W = self.image.shape[:2]
         
         self.flip_x = bool(getattr(mrc_summary, 'flip_x', False))
@@ -125,6 +126,14 @@ class CLEMPicker:
         if buffer is not None:
             self.nav_map_buffer = buffer
 
+    def _shift_from_stage(self, pick, target_pick, stage_to_is):
+        d = np.array([pick.stage_x_um - target_pick.stage_x_um, pick.stage_y_um - target_pick.stage_y_um], float)
+        return stage_to_is @ d
+    
+    def _shift_from_image(self, pick, target_pick, cam_to_is, montage_px_per_record_px):
+        d_cam = np.array([pick.stage_x_um - target_pick.stage_x_um, pick.stage_y_um - target_pick.stage_y_um], float) * montage_px_per_record_px
+        return cam_to_is @ d_cam
+
     # ════════════════════════════════════════════════════════════════════════
     # Pick Creation and Management
     # ════════════════════════════════════════════════════════════════════════
@@ -180,51 +189,22 @@ class CLEMPicker:
         """Get all picks."""
         return self.site_data.picks.copy()
     
-    def _add_nav_point(self, pick, group_id, label):
-        nav_idx = self.tem.add_nav_point(self, pick=pick, group_id=group_id, label=label, output_coord_mode = self.output_coord_mode)
-        return nav_idx
-    
     def add_group_to_navigator(self, group: TargetGroup, record_mag: int) -> Dict[str, int]:
 
         target = group.tracking
-        nav_indices = {target.pick_id: self.tem.add_nav_point(pick=target, label=f"001_{target.pick_id}")}
+        print(f"[INFO] Adding nav point 1.")
+        nav_indices = {target.pick_id: self.tem.add_nav_point(pick=target, label=f"001_{target.pick_id}", output_coord_mode=self.output_coord_mode)}
         for i, pick in enumerate(group.picks):
             if pick.pick_id == target.pick_id:
                 continue
-            nav_indices[pick.pick_id] = self.tem.add_nav_point(pick=pick, label=f"{str(i+2).zfill(3)}_{pick.pick_id}")
+            nav_indices[pick.pick_id] = self.tem.add_nav_point(pick=pick, label=f"{str(i+2).zfill(3)}_{pick.pick_id}", output_coord_mode=self.output_coord_mode)
         
         return nav_indices
 
 
     # ════════════════════════════════════════════════════════════════════════
-    # Image Cropping and Preprocessing
+    # Image Display Function
     # ════════════════════════════════════════════════════════════════════════
-
-    def crop_montage_around_pick(self, pick: Pick, fov_um: Tuple[float, float]) -> np.ndarray:
-        
-        fov_x = fov_um[0] / self.pixel_spacing_um
-        fov_y = fov_um[1] / self.pixel_spacing_um
-        
-        px, py = pick.pixel_x_um, pick.pixel_y_um
-        x0_des, x1_des = int(px - fov_x / 2), int(px + fov_x / 2)
-        y0_des, y1_des = int(py - fov_y / 2), int(py + fov_y / 2)
-        
-        y0, y1 = max(0, y0_des), min(self.image.shape[0], y1_des)
-        x0, x1 = max(0, x0_des), min(self.image.shape[1], x1_des)
-        crop = self.image[y0:y1, x0:x1].astype(np.float32, copy=True)
-
-        saturated = crop >= 1.0
-        valid = crop[~saturated]
-        mean = float(valid.mean()) if valid.size else 0.0
-        crop[saturated] = mean
-
-        pad = ((max(0, -y0_des), max(0, y1_des - self.image.shape[0])),
-               (max(0, -x0_des), max(0, x1_des - self.image.shape[1])))
-        if any(sum(p) for p in pad):
-            crop = np.pad(crop, pad, mode="constant", constant_values=mean)
-            print("[WARN] Target near montage edge; crop was padded.")
-        
-        return crop
 
     def normalize_image(self, image: np.ndarray) -> np.ndarray:
         img_min, img_max = image.min(), image.max()
@@ -351,45 +331,10 @@ class CLEMPicker:
         return self.make_pick_dataclass(cpx, cpy, pick_id=track_id)
 
     # ════════════════════════════════════════════════════════════════════════
-    # Reference Image Extraction
-    # ════════════════════════════════════════════════════════════════════════
-
-    def extract_reference_crops_for_group(self, group: TargetGroup, crop_fov_um: float = 5.0, output_subfolder: str = 'references') -> Dict[str, str]:
-        
-        print(f"\n[INFO] Extracting reference crops for group {group.group_id}...")
-        
-        output_folder = os.path.join(self.site_output_root, output_subfolder)
-        os.makedirs(output_folder, exist_ok=True)
-        
-        pick_crops = {}
-        
-        for pick in group.picks:
-            if pick.pick_id == group.tracking.pick_id:
-                continue
-            
-            crop = self.crop_montage_around_pick(pick, fov=(crop_fov_um, crop_fov_um))
-            
-            crop_filename = f"{pick.pick_id}_crop_montage.mrc"
-            crop_path = os.path.join(output_folder, crop_filename)
-            
-            with mrcfile.new(crop_path, overwrite=True) as mrc:
-                mrc.set_data(crop)
-                mrc.voxel_size = self.pixel_spacing_um * 10000  # nm to Angstroms
-                mrc.update_header_from_data()
-            
-            pick_crops[pick.pick_id] = crop_path
-            print(f"  Saved: {crop_filename}")
-        
-        return pick_crops
-
-    # ════════════════════════════════════════════════════════════════════════
     # Target Refinement
     # ════════════════════════════════════════════════════════════════════════
 
     def refine_target_stage_position(self, target_pick: Pick,
-                                    montage_mag: int = 2000,
-                                    record_mag: int = 40000,
-                                    view_mag: int = 15000,
                                     output_subfolder: str = 'references') -> Pick:
         
         print(f"\n[INFO] Refining target {target_pick.pick_id}...")
@@ -406,25 +351,25 @@ class CLEMPicker:
             mrc.set_data(montage_crop)
             mrc.voxel_size = self.pixel_spacing_um * 10000
             mrc.update_header_from_data()
-        
-        # Align at higher magnification
+
         alignment_result = self.align_target_at_higher_mag(
             pick_id=target_pick.pick_id,
             target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
-            reference_image_path=montage_ref_path,
-            mode='Record'
-        )
+            reference_image_path=montage_ref_path, mode='Search')
         
         refined_x, refined_y, refined_z = alignment_result['refined_stage']
-        
-        # Save record image
-        record_filename = f"{target_pick.pick_id}_record_{record_mag}x.mrc"
+
+        alignment_result = self.align_target_at_higher_mag(
+            pick_id=target_pick.pick_id,
+            target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
+            reference_image_path=montage_ref_path, mode='Record')
+
+        record_properties = self.tem.get_image_properties(mode='Record')
+        record_filename = f"{target_pick.pick_id}_record_{record_properties['magnefication']}x.mrc"
         record_path = os.path.join(output_folder, record_filename)
         self.tem.save_image_from_buffer(output_path=record_path, buffer='B')
-        
-        # Save view crop
-        self.tem.set_magnification(view_mag)
-        self.tem.acquire_image(mode='View')
+  
+        search_properties = self.tem.acquire_image(mode='Search')
         
         view_image = self.tem.get_image_from_buffer(buffer='A')
         img_props = self.tem.get_image_properties()
@@ -439,7 +384,7 @@ class CLEMPicker:
         
         view_crop = view_image[y0:y1, x0:x1].astype(np.float32)
         
-        view_filename = f"{target_pick.pick_id}_view_{view_mag}x.mrc"
+        view_filename = f"{target_pick.pick_id}_view_{search_properties['magnification']}x.mrc"
         view_path = os.path.join(output_folder, view_filename)
         
         with mrcfile.new(view_path, overwrite=True) as mrc:
@@ -473,81 +418,67 @@ class CLEMPicker:
         
         # Run alignment routine (includes AlignBetweenMags + fine refinement)
         print('[INFO] Running SerialEM alignment routine.')
-        self.tem.run_serialem_alignment_routine(buffer=buffer,
-            pick_id=pick_id,
-            mode=mode,
-            mag_compensation=True
-        )
+        self.tem.run_serialem_alignment_routine(buffer=buffer, pick_id=pick_id, mode=mode, mag_compensation=True)
         
         # Get refined stage position
         refined_stage_x, refined_stage_y, refined_stage_z = self.tem.report_stage_position()[:3]
         
         return {
-            'pick_id': pick_id,
-            'refined_stage': (refined_stage_x, refined_stage_y, refined_stage_z),
-        }
+                    'pick_id': pick_id,
+                    'refined_stage': (refined_stage_x, refined_stage_y, refined_stage_z),
+                }
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 8: Image Shift Calculation
     # ════════════════════════════════════════════════════════════════════════
 
-    def calculate_image_shift_for_pick(self, pick: Pick, target_pick: Pick, target_magnification: int, calibration_calculator) -> Pick:
+    def calculate_image_shift_for_pick(self, pick: Pick, target_pick: Pick, transform, source="image", extra=None) -> Pick:
 
         if pick.pick_id == target_pick.pick_id:
             print(f"  {pick.pick_id} (tracking): no shift needed")
             pick.image_shift_x = 0.0
             pick.image_shift_y = 0.0
             return pick
-
-        offset_x_px = pick.pixel_x_um - target_pick.pixel_x_um
-        offset_y_px = pick.pixel_y_um - target_pick.pixel_y_um
-
-        offset_x_um = offset_x_px * self.pixel_spacing_um
-        offset_y_um = offset_y_px * self.pixel_spacing_um
-
-        shift_x, shift_y = calibration_calculator.apply_matrix_to_shift(offset_x_um, offset_y_um, target_magnification)
-
-        pick.image_shift_x = shift_x
-        pick.image_shift_y = shift_y
         
-        print(f"{pick.pick_id}: shift=({shift_x:+.6f}, {shift_y:+.6f}) µm")
+        if source == 'stage':
+            is_x, is_y = self._shift_from_stage(pick, target_pick, transform)
+        else:
+            is_x, is_y = self._shift_from_image(pick, target_pick, transform, extra)
+
+        
+
+        pick.image_shift_x = is_x
+        pick.image_shift_y = is_y
+        
+        print(f"{pick.pick_id}: shift=({is_x:+.6f}, {is_y:+.6f}) µm")
         
         return pick
 
-    def calculate_image_shifts_for_group(self, group: TargetGroup, target_magnification: int, calibration_calculator) -> TargetGroup:
+    def calculate_image_shifts_for_group(self, group: TargetGroup, source='image', mode='R') -> TargetGroup:
 
-        print(f"\n[INFO] Calculating image shifts for group {group.group_id}...")
+        if source == 'stage':
+            transform = self.tem.report_stage_to_is_matrix(mode=mode)
+            extra = None
+        else:
+            transform = self.tem.report_camera_to_is_matrix(mode=mode)
+            record_props = self.tem.get_image_properties(mode=mode)
+            extra = self.pixel_spacing_um / record_props["pixel_size_um"]
+
+        if transform is None:
+            for pick in group.picks:
+                pick.image_shift_x = 0.0
+                pick.image_shift_y = 0.0
+            return group
         
         for pick in group.picks:
-            self.calculate_image_shift_for_pick(pick, group.tracking, target_magnification, calibration_calculator)
-        
+            self.calculate_image_shift_for_pick(pick=pick, target_pick=group.tracking, transform=transform, extra=extra, source=source)
         return group
 
     # ════════════════════════════════════════════════════════════════════════
     # File Generation (xg1)
     # ════════════════════════════════════════════════════════════════════════
 
-    def generate_xg1_file(self, group: TargetGroup, record_mag: int,
-                         output_folder: str) -> str:
-        """
-        Generate xg1 file for paceTomo using Pick objects.
-        
-        Reads all data directly from Pick fields.
-        
-        Parameters
-        ----------
-        group : TargetGroup
-            Group with refined picks
-        record_mag : int
-            Record magnification
-        output_folder : str
-            Where to save xg1 file
-        
-        Returns
-        -------
-        xg1_path : str
-            Path to generated xg1 file
-        """
+    def generate_xg1_file(self, group: TargetGroup, output_folder: str) -> str:
         
         os.makedirs(output_folder, exist_ok=True)
         
@@ -555,23 +486,18 @@ class CLEMPicker:
         
         xg1_filename = f"xg1_group_{group.group_id}.txt"
         xg1_path = os.path.join(output_folder, xg1_filename)
-        
+        record_img_properties = self.tem.get_image_properties(mode='Record')
+
         print(f"\n[INFO] Generating xg1 file: {xg1_filename}")
         
         lines = []
-        
-        # Header
+
         lines.append("# Specimen Grid Group File (xg1)")
         lines.append(f"# Generated: {datetime.now().isoformat()}")
         lines.append(f"# Group: {group.group_id}")
-        lines.append(f"# Magnification: {record_mag}x")
+        lines.append(f"# Magnification: {record_img_properties['magnification']}x")
         lines.append("")
-        
-        # ─────────────────────────────────────────────────────────────────
-        # Tracking target (001)
-        # ─────────────────────────────────────────────────────────────────
-        
-        # Get stage position (refined if available, else original)
+
         if target.refined_stage_x is not None:
             target_stage_x = target.refined_stage_x
             target_stage_y = target.refined_stage_y
@@ -580,8 +506,7 @@ class CLEMPicker:
             target_stage_x = target.stage_x_um
             target_stage_y = target.stage_y_um
             target_stage_z = target.stage_z_um
-        
-        # Get image shift
+ 
         shift_x, shift_y = target.get_image_shift()
         
         lines.append("_target = 001")
@@ -645,79 +570,58 @@ class CLEMPicker:
         return xg1_path
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 11: Workflow Orchestration
+    # Run paceTomo target/group generation for all picks/groups
     # ════════════════════════════════════════════════════════════════════════
 
-    def run_create_groups_for_pacetomo(self, group: TargetGroup, crop_fov = 2.0,
-                              calibration_calculator = None,
+    def export_groups_to_xg1(self, radius_um=7.5, crop_fov=2.0,
+                             shift_source = "image",
                               output_folder: Optional[str] = None) -> Dict:
 
-        print(f"\n{'='*70}")
-        print(f"Processing Group {group.group_id}")
-        print(f"{'='*70}")
-
-        ref_crops = self.extract_reference_crops_for_group(group)
         
-        target = self.refine_target_stage_position(group.tracking)
-        
-        # Step 3: Calculate image shifts
-        if calibration_calculator is not None:
-            self.calculate_image_shifts_for_group(group,calibration_calculator)
-        
-        # Step 4: Generate xg1
         if output_folder is None:
             output_folder = self.site_output_root
-        
+        os.makedirs(output_folder, exist_ok=True)
+
+        groups = self.group_picks(radius_um=radius_um)
+        xg1_files = []
+        for group in groups:
+            self.calculate_image_shifts_for_group(group, source=shift_source)
+            xg1_files.append(self.generate_xg1_file(group, output_folder))
+
+        return groups, xg1_files
+    
+    def run_create_groups_for_pacetomo(self, group, crop_fov=2.0, output_folder=None, shift_source="image"):
+
+        if output_folder is None:
+            output_folder = self.site_output_root
+        os.makedirs(output_folder, exist_ok=True)
+
+        ref_crops = self.mrc_reader.write_mrc_crops(group.picks, self.image, crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"), skip_pick_id=group.trakcing.pick_id)
+
+        target = self.refine_target_stage_position(group.tracking)
+
+        self.calculate_image_shifts_for_group(group, source=shift_source)
+
         xg1_path = self.generate_xg1_file(group, output_folder)
-        
-        # Step 5: Create navigator
-        nav_indices = self.add_group_to_navigator(group, g)
-        
+
+        nav_indices = self.add_group_to_navigator(group)
+
         return {
             'group_id': group.group_id,
             'target': target,
             'reference_crops': ref_crops,
             'xg1_file': xg1_path,
-            'navigator_indices': nav_indices,
+            'navigator_indices': nav_indices
         }
 
-    def process_all_groups_complete(self, groups: List[TargetGroup],
-                                   montage_mag: int = 2000,
-                                   record_mag: int = 40000,
-                                   view_mag: int = 15000,
-                                   calibration_calculator = None,
-                                   output_folder: Optional[str] = None) -> List[Dict]:
-        """
-        Complete workflow for processing all groups.
         
-        Parameters
-        ----------
-        groups : list of TargetGroup
-            Groups to process
-        montage_mag : int
-            Montage magnification
-        record_mag : int
-            Record magnification
-        view_mag : int
-            View magnification
-        calibration_calculator : CalibratedImageShiftCalculator
-            Calibration for image shifts
-        output_folder : str
-            Main project folder
-        
-        Returns
-        -------
-        results : list of dict
-            Results for each group
-        """
-        
+
+    def process_all_groups_complete(self, groups: List[TargetGroup], output_folder: Optional[str] = None) -> List[Dict]:
+    
         results = []
         
         for group in groups:
-            result = self.process_group_complete(
-                group, montage_mag, record_mag, view_mag,
-                calibration_calculator, output_folder
-            )
+            result = self.export_groups_to_xg1(group=groups, shift_source='image', output_folder=output_folder)
             results.append(result)
         
         print(f"\n{'='*70}")

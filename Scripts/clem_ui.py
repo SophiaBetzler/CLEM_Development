@@ -700,6 +700,15 @@ class StagePickerWindow(tk.Toplevel):
         self._record_mag_var = tk.StringVar(value="40000")
         ttk.Entry(mag_row, textvariable=self._record_mag_var, width=8).pack(
             side="left", padx=(4, 0))
+        
+        self._shift_source_var = tk.StringVar(value="stage")
+        src_row = ttk.Frame(btn)
+        src_row.grid(row=8, column=0, columnspan=2, sticky='ew', pady=(0, 4))
+        ttk.Label(src_row, text="Shift from", style="Sm.TLabel").pack(side="left")
+        ttk.Radiobutton(src_row, text="stage", value="stage",
+                        variable=self._shift_source_var).pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(src_row, text="image", value="image",
+                        variable=self._shift_source_var).pack(side="left", padx=(4, 0))
 
         # Group & Export button
         ttk.Button(btn, text="Group picks & Export xg1",
@@ -743,30 +752,21 @@ class StagePickerWindow(tk.Toplevel):
         self._recompose()
 
     def _group_and_export_xg1(self):
-        """
-        Group picks spatially and export each group as a paceTomo xg1 file.
-        
-        Uses CLEMPicker's group_picks() and generate_xg1_file() methods.
-        All the logic is in CLEMPicker - this is just the UI wrapper.
-        """
-        
-        # Validate: need picks first
+ 
         if not self._picks:
             messagebox.showwarning(
                 "No picks",
                 "Add at least one pick before exporting.",
                 parent=self)
             return
-        
-        # Validate: need CLEMPicker
+
         if self.clem_picker is None:
             messagebox.showerror(
                 "No CLEMPicker",
                 "CLEMPicker was not provided to this window.",
                 parent=self)
             return
-        
-        # Parse group radius
+
         try:
             radius_um = float(self._radius_var.get())
             if radius_um <= 0:
@@ -798,13 +798,10 @@ class StagePickerWindow(tk.Toplevel):
             return
         
         try:
-            # ─────────────────────────────────────────────────────────
-            # Step 1: Group picks (all logic in CLEMPicker)
-            # ─────────────────────────────────────────────────────────
             self._status.set("Grouping picks...")
             self.update_idletasks()
             
-            groups = self.clem_picker.group_picks(radius_um=radius_um)
+            groups, xg1_files = self.clem_picker.export_groups_to_xg1(radius_um=radius_um, shift_source=self._shift_source_var.get(), output_folder=output_folder)
             
             if not groups:
                 messagebox.showwarning(
@@ -813,24 +810,6 @@ class StagePickerWindow(tk.Toplevel):
                     parent=self)
                 return
             
-            # ─────────────────────────────────────────────────────────
-            # Step 2: Generate xg1 file for each group
-            # ─────────────────────────────────────────────────────────
-            xg1_files = []
-            for i, group in enumerate(groups):
-                self._status.set(f"Generating xg1 for group {i+1}/{len(groups)}...")
-                self.update_idletasks()
-                self.clem_picker.run_create_groups_for_pacetomo(self, group: TargetGroup, 
-                              montage_mag: int = 2000,
-                              record_mag: int = 40000,
-                              view_mag: int = 15000,
-                              calibration_calculator = None,
-                              output_folder: Optional[str] = None)
-                xg1_files.append(xg1_path)
-            
-            # ─────────────────────────────────────────────────────────
-            # Step 3: Update UI to show results
-            # ─────────────────────────────────────────────────────────
             self._draw_groups_on_canvas(groups)
             
             total_picks = sum(len(g.picks) for g in groups)
@@ -1142,13 +1121,18 @@ class StagePickerWindow(tk.Toplevel):
                                    parent=self)
             return
 
-        fov = 1.0
-        if fov == "bad":
-            messagebox.showwarning(
-                "FOV width",
-                "Enter a positive number for the FOV width (um), or leave it "
-                "blank to export positions only.", parent=self)
-            return
+        fov_str = self._fov_var.get().strip() 
+        print(fov_str)
+        fov = None
+        if fov_str:
+            try:
+                fov = float(fov_str)
+                if fov <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("FOV width", "Enter positive number for the FOV width (um)", parent=self)
+                return
+            
 
         path = filedialog.asksaveasfilename(
             parent=self,
@@ -1645,7 +1629,6 @@ class RegistrationApp(tk.Tk):
             return
 
         try:
-            self.mrc_reader.load_mrc_into(self.site_data, path)
             self.mrc_reader.load_mrc_into(self.site_data, path)
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
@@ -2168,48 +2151,50 @@ class RegistrationApp(tk.Tk):
                 "transform, so the channels can be warped."); return
         path = filedialog.askopenfilename(
             title="Import transform",
-            filetypes=[("Text", "*.txt"), ("All files", "*")])
+            filetypes=[("Text", "*.txt"), ("CSV", "*.csv"), ("All files", "*")])
         if not path: return
         try:
-            ttype = None; fx = fy = None; rows = []
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    s = line.strip()
-                    if not s:
-                        continue
-                    if s.startswith("#"):
-                        body = s.lstrip("#").strip().lower()
-                        if "=" not in body:
+            if os.path.splitext(path)[1].lower() == ".csv":
+                from clem_correlation import CLEMCorrelator
+                tform = CLEMCorrelator(mrc_reader=self.mrc_reader).load_transform_from_csv(path)
+                ttype = None
+                fx = fy = None
+            else:
+                ttype = None; fx = fy = None; rows = []
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        s = line.strip()
+                        if not s:
                             continue
-                        key, _, val = body.partition("=")
-                        key = key.strip(); val = val.strip()
-                        if key == "transform_type":
-                            ttype = val
-                        elif key == "flip_x":
-                            fx = val in ("1", "true", "yes")
-                        elif key == "flip_y":
-                            fy = val in ("1", "true", "yes")
-                        continue
-                    parts = s.replace(",", " ").split()
-                    try:
-                        nums = [float(p) for p in parts]
-                    except ValueError:
-                        continue
-                    if len(nums) >= 3:
-                        rows.append(nums[:3])
-            if len(rows) < 3:
-                messagebox.showerror(
-                    "Import error",
-                    "Could not find a 3x3 transform matrix in the file."); return
-            M = np.array(rows[:3], dtype=float)
+                        if s.startswith("#"):
+                            body = s.lstrip("#").strip().lower()
+                            if "=" not in body:
+                                continue
+                            key, _, val = body.partition("=")
+                            key = key.strip(); val = val.strip()
+                            if key == "transform_type":
+                                ttype = val
+                            elif key == "flip_x":
+                                fx = val in ("1", "true", "yes")
+                            elif key == "flip_y":
+                                fy = val in ("1", "true", "yes")
+                            continue
+                        parts = s.replace(",", " ").split()
+                        try:
+                            nums = [float(p) for p in parts]
+                        except ValueError:
+                            continue
+                        if len(nums) >= 3:
+                            rows.append(nums[:3])
+                if len(rows) < 3:
+                    messagebox.showerror(
+                        "Import error",
+                        "Could not find a 3x3 transform matrix in the file."); return
+                M = np.array(rows[:3], dtype=float)
+                from skimage.transform import ProjectiveTransform
+                tform = ProjectiveTransform(matrix=M)
         except Exception as e:
             messagebox.showerror("Import error", str(e)); return
-
-        from skimage.transform import ProjectiveTransform
-        try:
-            tform = ProjectiveTransform(matrix=M)
-        except Exception as e:
-            messagebox.showerror("Import error", f"Invalid matrix:\n{e}"); return
 
         # Restore the transform type label and the flip state, then re-warp.
         if ttype in ("euclidean", "similarity", "affine", "projective"):

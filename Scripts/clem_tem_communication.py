@@ -48,7 +48,7 @@ class TEMComm:
         group_id = sem.GetUniqueNavID()
         if output_coord_mode == "image":
             z = stage_z if stage_z is not None else -999
-            nav_idx = int(sem.AddImagePosAsNavPoint(self.buffer, pick.pixel_x_um, pick.pixel_y_um, z, group_id, 1))
+            nav_idx = int(sem.AddImagePosAsNavPoint("A", pick.pixel_x_um, pick.pixel_y_um, z, group_id, 1))
         else:
             z = stage_z if stage_z is not None else -999
             nav_idx = int(sem.AddStagePosAsNavPoint(stage_x, stage_y, z, group_id, 1))
@@ -79,9 +79,12 @@ class TEMComm:
             if sem.ReportIfNavOpen() == 0:
                 self._create_nav_file()
             
+            while sem.ReportFileNumber() > 0:
+                sem.CloseFile()
+
             sem.OpenOldFile(mrc_path)
-            sem.ReadMontage(0)
-            sem.NewMap()
+            sem.ReadFile(0)
+            sem.NewMap(0, Path(mrc_path).stem)
             sem.CloseFile()
         
     def _save_buffer_image(self, site_id=None, acquisition_type=None, label=None):
@@ -242,6 +245,24 @@ class TEMComm:
             sem.MoveStage(stage_x_um - backlashXY, stage_y_um - backlashXY, stage_z_um)
             sem.Delay(1, 'sec')
             sem.MoveStage(backlashXY, backlashXY, 0.0)
+
+    def report_matrix(self, kind, mag_index=0):
+        vals = getattr(sem, f"{kind}Matrix")(mag_index)
+        return np.array(vals[:4], dtype=float).reshape(2, 2)
+    
+    def report_stage_to_is_matrix(self, mode='R'):
+        if self.offline:
+            return None
+        sem.GoToLowDoseArea(mode)
+        stage_to_cam = self.report_matrix("stageToCamera", 0)
+        cam_to_is = self.report_matrix("CameraToIS", 0)
+        return cam_to_is @ stage_to_cam
+    
+    def report_camera_to_is_matrix(self, mode='R'):
+        if self.offline:
+            return None
+        sem.GoToLowDoseArea(mode)
+        return self.report_matrix("CameraToIS", 0)
 
     # ---------------------------------------------------------------------------
     # Montage control

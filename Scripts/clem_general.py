@@ -148,6 +148,6 @@ class ExecutiveControls:
         return self.site_summaries
 
     def run_clem_fine_alignment(self):
-        self.mrc.crop
+        self.mrc.write_mrc_crops(self, )
 
 
