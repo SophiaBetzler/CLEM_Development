@@ -21,6 +21,19 @@ class CLEMCorrelator:
     # Helper function
     # ---------------------------------------------------------------------------
 
+    def _resolve_flip(self, flip_value, flip_name):
+        if flip_value is not None:
+            return bool(flip_value)
+
+        if self.mrc_reader is None:
+            return False
+
+        if flip_name == "flip_y":
+            return bool(getattr(self.mrc_reader, "MONTAGE_FLIP_Y", False))
+        if flip_name == "flip_x":
+            return bool(getattr(self.mrc_reader, "MONTAGE_FLIP_X", False))
+        return False
+
     @staticmethod
     def _get_tiff_slice(tiff_stack, c, z, flip_x=False, flip_y=False):
         img = tiff_stack[c, z]
@@ -34,26 +47,9 @@ class CLEMCorrelator:
     # Functions which handel the transformation between the MRC and TIFF coordinate systems
     # ---------------------------------------------------------------------------
 
-    def fit_fixed_scale_reflection(self,point_pairs, tiff_shape, fixed_scale,
-                                    scale_tolerance=0.05, flip_x=False, flip_y=False,
-                                    initial_transform=None):
-
-        complete = [(p["tiff"], p["mrc"]) for p in point_pairs if "tiff" in p and "mrc" in p]
-
-        if len(complete) < 2:
-            raise ValueError("Bounded-scale reflected similarity needs at least 2 pairs; received {len(complete)}.")
-
-        if fixed_scale <= 0:
-            raise ValueError("fixed_scale must be positive.")
-
-        if not 0 <= scale_tolerance < 1:
-            raise ValueError("scale_tolerance must be between 0 and 1.")
-
-        src = np.asarray([p[0] for p in complete], dtype=float)
-        dst = np.asarray([p[1] for p in complete], dtype=float)
-
+    @staticmethod
+    def _build_reflection_matrix(tiff_shape, flip_x=False, flip_y=False):
         tiff_h, tiff_w = tiff_shape[-2:]
-
         F = np.eye(3, dtype=float)
 
         if flip_x:
@@ -71,6 +67,30 @@ class CLEMCorrelator:
                             [0.0,  0.0,             1.0],
                         ])
             F = Fy @ F
+
+        return F
+
+    def fit_fixed_scale_reflection(self,point_pairs, tiff_shape, fixed_scale,
+                                    scale_tolerance=0.05, flip_x=None, flip_y=None,
+                                    initial_transform=None):
+
+        complete = [(p["tiff"], p["mrc"]) for p in point_pairs if "tiff" in p and "mrc" in p]
+
+        if len(complete) < 2:
+            raise ValueError("Bounded-scale reflected similarity needs at least 2 pairs; received {len(complete)}.")
+
+        if fixed_scale <= 0:
+            raise ValueError("fixed_scale must be positive.")
+
+        if not 0 <= scale_tolerance < 1:
+            raise ValueError("scale_tolerance must be between 0 and 1.")
+
+        src = np.asarray([p[0] for p in complete], dtype=float)
+        dst = np.asarray([p[1] for p in complete], dtype=float)
+
+        flip_x = self._resolve_flip(flip_x, "flip_x")
+        flip_y = self._resolve_flip(flip_y, "flip_y")
+        F = self._build_reflection_matrix(tiff_shape, flip_x=flip_x, flip_y=flip_y)
 
         src_h = np.column_stack([src, np.ones(len(src), dtype=float),])
 
@@ -141,12 +161,80 @@ class CLEMCorrelator:
 
         return tform, fit_info, len(complete)
 
-    def fit_tiff_to_mrc(self, point_pairs, transform_type, predefined=None, tiff_shape=None,
-                        fixed_scale=None, flip_x=False, flip_y=False, initial_transform=None):
-        if predefined is not None:
-            tform, fit_info, n_complete = self.fit_fixed_scale_reflection(
+    def fit_similarity_with_reflection(self, point_pairs, tiff_shape, flip_x=None, flip_y=None):
+        complete = [(p["tiff"], p["mrc"]) for p in point_pairs if "tiff" in p and "mrc" in p]
+
+        if len(complete) < 2:
+            raise ValueError("Similarity transform with reflection needs at least 2 pairs; received {len(complete)}.")
+
+        src = np.asarray([p[0] for p in complete], dtype=float)
+        dst = np.asarray([p[1] for p in complete], dtype=float)
+
+        flip_x = self._resolve_flip(flip_x, "flip_x")
+        flip_y = self._resolve_flip(flip_y, "flip_y")
+        F = self._build_reflection_matrix(tiff_shape, flip_x=flip_x, flip_y=flip_y)
+
+        src_h = np.column_stack([src, np.ones(len(src), dtype=float)])
+        reflected_h = (F @ src_h.T).T
+        reflected = reflected_h[:, :2] / reflected_h[:, 2, None]
+
+        free_tform = estimate_transform("similarity", reflected, dst)
+        base_matrix = np.asarray(free_tform.params, dtype=float)
+        matrix = base_matrix @ F
+        tform = ProjectiveTransform(matrix=matrix)
+        fit_info = self._fit_diagnostics(tform, src, dst)
+
+        fit_info.update({
+            "flip_x": bool(flip_x),
+            "flip_y": bool(flip_y),
+        })
+
+        return tform, fit_info, len(complete)
+
+    def fit_predefined_transform(self, point_pairs, tiff_shape, predefined_transform=None,
+                                 fixed_scale=None, flip_x=None, flip_y=None,
+                                 initial_transform=None):
+        complete = [(p["tiff"], p["mrc"]) for p in point_pairs if "tiff" in p and "mrc" in p]
+
+        if len(complete) < 2:
+            raise ValueError("Predefined transform needs at least 2 pairs; received {len(complete)}.")
+
+        src = np.asarray([p[0] for p in complete], dtype=float)
+        dst = np.asarray([p[1] for p in complete], dtype=float)
+
+        base_transform = predefined_transform or initial_transform
+        if base_transform is None:
+            raise ValueError("predefined_transform or initial_transform must be provided.")
+
+        flip_x = self._resolve_flip(flip_x, "flip_x")
+        flip_y = self._resolve_flip(flip_y, "flip_y")
+        F = self._build_reflection_matrix(tiff_shape, flip_x=flip_x, flip_y=flip_y)
+        base_matrix = np.asarray(base_transform.params, dtype=float)
+        matrix = base_matrix @ F
+        tform = ProjectiveTransform(matrix=matrix)
+        fit_info = self._fit_diagnostics(tform, src, dst)
+
+        fit_info.update({
+            "expected_scale": None if fixed_scale is None else float(fixed_scale),
+            "flip_x": bool(flip_x),
+            "flip_y": bool(flip_y),
+        })
+
+        if fixed_scale is not None:
+            if fixed_scale <= 0:
+                raise ValueError("fixed_scale must be positive.")
+            fit_info["expected_scale"] = float(fixed_scale)
+
+        return tform, fit_info, len(complete)
+
+    def fit_tiff_to_mrc(self, point_pairs, transform_type, predefined=None, predefined_transform=None,
+                        tiff_shape=None, fixed_scale=None, flip_x=None, flip_y=None,
+                        initial_transform=None):
+        if predefined is not None or predefined_transform is not None:
+            tform, fit_info, n_complete = self.fit_predefined_transform(
                 point_pairs,
                 tiff_shape=tiff_shape,
+                predefined_transform=predefined_transform or predefined,
                 fixed_scale=fixed_scale,
                 flip_x=flip_x,
                 flip_y=flip_y,
@@ -159,20 +247,30 @@ class CLEMCorrelator:
             if len(complete) < required:
                 raise ValueError(f"{transform_type.capitalize()} needs >= {required} pairs (you have {len(complete)}).")
 
-            src = np.array([p[0] for p in complete], dtype=float)
-            dst = np.array([p[1] for p in complete], dtype=float)
+            if transform_type in {"similarity", "euclidean"} and (self._resolve_flip(flip_x, "flip_x") or self._resolve_flip(flip_y, "flip_y")):
+                tform, fit_info, n_complete = self.fit_similarity_with_reflection(
+                    point_pairs,
+                    tiff_shape=tiff_shape,
+                    flip_x=flip_x,
+                    flip_y=flip_y,
+                )
+            else:
+                src = np.array([p[0] for p in complete], dtype=float)
+                dst = np.array([p[1] for p in complete], dtype=float)
 
-            tform = estimate_transform(transform_type, src, dst)
-            fit_info = self._fit_diagnostics(tform, src, dst)
+                tform = estimate_transform(transform_type, src, dst)
+                fit_info = self._fit_diagnostics(tform, src, dst)
 
-            self.last_tform = tform
+                self.last_tform = tform
 
         return tform, fit_info, len(complete)
     
-    def warp_channels_to_mrc(self, tiff_stack, tform, mrc_shape, flip_x=False, flip_y=False, status_cb=None,):
+    def warp_channels_to_mrc(self, tiff_stack, tform, mrc_shape, flip_x=None, flip_y=None, status_cb=None,):
 
         mrc_h, mrc_w = mrc_shape
         C, Z = tiff_stack.shape[:2]
+        flip_x = self._resolve_flip(flip_x, "flip_x")
+        flip_y = self._resolve_flip(flip_y, "flip_y")
 
         warped_channels = []
 
@@ -198,11 +296,12 @@ class CLEMCorrelator:
         return warped_channels
 
 
-    def apply_transform(self, point_pairs, transform_type, tiff_stack, mrc_shape, flip_x=False, flip_y=False, status_cb=None,
-                        initial_transform=None, predefined=None, fixed_scale=None, tiff_shape=None):
+    def apply_transform(self, point_pairs, transform_type, tiff_stack, mrc_shape, flip_x=None, flip_y=None, status_cb=None,
+                        initial_transform=None, predefined=None, predefined_transform=None, fixed_scale=None, tiff_shape=None):
 
         tform, fit_info, n_pairs = self.fit_tiff_to_mrc(point_pairs,transform_type,predefined=predefined,
-            tiff_shape=tiff_shape or tiff_stack.shape, fixed_scale=fixed_scale, flip_x=flip_x, flip_y=flip_y,
+            predefined_transform=predefined_transform, tiff_shape=tiff_shape or tiff_stack.shape,
+            fixed_scale=fixed_scale, flip_x=flip_x, flip_y=flip_y,
             initial_transform=initial_transform,)
 
         warped_channels = self.warp_channels_to_mrc(tiff_stack=tiff_stack, tform=tform, mrc_shape=mrc_shape, flip_x=flip_x, flip_y=flip_y,

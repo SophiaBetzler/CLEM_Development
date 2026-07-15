@@ -2,6 +2,7 @@ import os
 import sys
 
 import numpy as np
+from skimage.transform import ProjectiveTransform
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -35,4 +36,28 @@ def test_load_transform_from_csv_and_combine_with_fit(tmp_path):
     assert n_pairs == 2
     assert tform is not None
     assert fit_info["expected_scale"] == 1.0
+    assert np.asarray(tform.params).shape == (3, 3)
+
+
+def test_fit_predefined_transform_supports_flip_without_fixed_scale():
+    correlator = CLEMCorrelator(mrc_reader=None)
+    predefined = ProjectiveTransform(matrix=np.array([[1.0, 0.0, 10.0],
+                                                     [0.0, 1.0, 20.0],
+                                                     [0.0, 0.0, 1.0]]))
+
+    point_pairs = [
+        {"tiff": (0.0, 0.0), "mrc": (10.0, 20.0)},
+        {"tiff": (10.0, 0.0), "mrc": (20.0, 20.0)},
+    ]
+
+    tform, fit_info, n_pairs = correlator.fit_predefined_transform(
+        point_pairs,
+        tiff_shape=(100, 100),
+        predefined_transform=predefined,
+        flip_y=True,
+    )
+
+    assert n_pairs == 2
+    assert tform is not None
+    assert fit_info["flip_y"] is True
     assert np.asarray(tform.params).shape == (3, 3)

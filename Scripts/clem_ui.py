@@ -801,7 +801,8 @@ class StagePickerWindow(tk.Toplevel):
             self._status.set("Grouping picks...")
             self.update_idletasks()
             
-            groups, xg1_files = self.clem_picker.export_groups_to_xg1(radius_um=radius_um, shift_source=self._shift_source_var.get(), output_folder=output_folder)
+            groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(radius_um=7.5, crop_fov=2.0, output_folder=output_folder, shift_source=self._shift_source_var.get())
+
             
             if not groups:
                 messagebox.showwarning(

@@ -342,8 +342,7 @@ class CLEMPicker:
         output_folder = os.path.join(self.site_output_root, output_subfolder)
         os.makedirs(output_folder, exist_ok=True)
         
-        # Create reference crop at montage
-        montage_crop = self.crop_montage_around_pick(target_pick, fov=(5.0, 5.0))
+        montage_crop = self.mrc_reader.write_mrc_crops(picks=target_pick, fov_um=(2.0, 2.0), output_root=output_folder)
         
         montage_ref_path = os.path.join(output_folder,
                                        f"{target_pick.pick_id}_crop_montage_reference.mrc")
@@ -590,21 +589,24 @@ class CLEMPicker:
 
         return groups, xg1_files
     
-    def run_create_groups_for_pacetomo(self, group, crop_fov=2.0, output_folder=None, shift_source="image"):
+    def run_create_groups_for_pacetomo(self, radius_um=7.5, crop_fov=2.0, output_folder=None, shift_source="image"):
 
         if output_folder is None:
             output_folder = self.site_output_root
         os.makedirs(output_folder, exist_ok=True)
 
-        ref_crops = self.mrc_reader.write_mrc_crops(group.picks, self.image, crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"), skip_pick_id=group.trakcing.pick_id)
+        groups = self.group_picks(radius_um=radius_um)
+        
 
-        target = self.refine_target_stage_position(group.tracking)
+        xg1_files = []
+        
+        for group in groups:
+            target = self.refine_target_stage_position(group.tracking)
+            self.calculate_image_shift_for_group(group, source=shift_source)
+            ref_crops = self.mrc_reader.write_mrc_crops(mrc_full=self.image, picks=group.picks, fov_um=crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"), skip_pick_id=group.trakcing.pick_id)
+            nav_indices = self.add_group_to_navigator(group)
+            xg1_files.append(self.generate_xg1_file(group, output_folder))
 
-        self.calculate_image_shifts_for_group(group, source=shift_source)
-
-        xg1_path = self.generate_xg1_file(group, output_folder)
-
-        nav_indices = self.add_group_to_navigator(group)
 
         return {
             'group_id': group.group_id,
