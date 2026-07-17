@@ -14,7 +14,7 @@ class ExecutiveControls:
 
     NA_VALUES = {"", "na", "NA", "n/a", "N/A", "none", "None"}
 
-    def __init__(self, tem_communication, mrc_reader, sample_type, milling_angle):
+    def __init__(self, tem_communication, mrc_reader, sample_type, milling_angle, site_collection):
 
         self.tem = tem_communication
         self.sample_type = sample_type
@@ -67,7 +67,7 @@ class ExecutiveControls:
         return sites
     
     def _write_sites_csv(self, sites, filename):
-        csv_path = os.path.join(self.path, filename)
+        csv_path = os.path.join(self.tem.output_root, filename)
 
         fieldnames = list(sites[0].keys())
 
@@ -87,18 +87,22 @@ class ExecutiveControls:
 
     def run_experiment_setup(self):
 
-        self.tem._create_nav_file()
+        #self.tem._create_nav_file()
         input("[ToDO] Please load the experiment file and the settings file. ENTER")
+             
+        #self.tem._reset_defocus()
+        #self.tem.precise_stage_move(stage_x_um=0.0, stage_y_um=0.0, stage_z_um=0.0, stage_tilt=0.0)
 
-        self.tem._reset_defocus()
-        self.tem.precise_stage_move(stage_x_um=0.0, stage_y_um=0.0, stage_z_um=0.0, stage_tilt=0.0)
-
-        self.tem.acquire_image(mode='View', imaging_state='LMM')
+        #self.tem.acquire_image(mode='View', imaging_state='LMM', create_map=False)
 
         input('[ToDO] Move feature suitable for eucentricity alignment to the center of the stage (shift + right click + drag). ENTER')
         
-        self.tem.set_eucentricity(level='rough')
-        self.tem.acquire_montage(imaging_state='LMM', fov_um_x=3000.0, fov_um_y=3000.0, stage_tilt=0.0, eucentricity=False)
+
+        #self.tem.set_eucentricity(level='rough')
+        #self.tem.acquire_montage(mode='Search', imaging_state='LMM', fov_um_x=3000.0, fov_um_y=3000.0, stage_tilt=0.0, eucentricity=False)
+        
+        self.tem.acquire_image(mode='View', imaging_state='grid_square') 
+        self.tem.return_control_to_serialem(message="[ToDo] Run 'align to marker' alignment. ENTER.")
 
     def run_acquire_position_montages(self):
         
@@ -108,22 +112,26 @@ class ExecutiveControls:
         for site_number, site in enumerate(sites):
             site_id = site.get("name") or f"site_{site_number+1:02d}"
             print(f"[INFO] Acquiring montage for {site_id}.")
-            
             self.tem.precise_stage_move(stage_x_um=site["stage_x_um"], stage_y_um=site["stage_y_um"], stage_z_um=site["stage_z_um"])
             self.tem.acquire_image(mode='View', imaging_state='grid_square') 
             input("Please move the center of the grid square / lamella to the center of the field of view. ENTER")
-            self.eucentricity_alignment(level='rough_fine')
+            #self.tem.set_eucentricity(level='rough_fine')
+            #self.tem.acquire_image(mode='View', imaging_state='grid_square', create_map=True, label=f"{site_id}_overview")
             stage_x_um, stage_y_um, stage_z_um, stage_tilt = self.tem.report_stage_position()
             updated_site = dict(site)
+            updated_site["site_id"] = site_id
             updated_site["stage_x_um"] = stage_x_um
             updated_site["stage_y_um"] = stage_y_um
             updated_site["stage_z_um"] = stage_z_um
             updated_site["stage_tilt"] = stage_tilt
-            updated_sites.append(updated_site)
+            updated_sites.append(updated_site)  
+        self.tem.acquire_image(mode='Search')
+        self.tem.return_control_to_serialem(message="Run 'align to marker' alignment. Press Continue to resume.")
         
         for site_number, updated_site in enumerate(updated_sites):
             self.tem.precise_stage_move(stage_x_um = updated_site["stage_x_um"], stage_y_um = updated_site["stage_y_um"], stage_z_um = updated_site["stage_z_um"])
-            self.tem.acquire_montage(stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], position=f"{site['name']}", eucentricity=False)
+            nav_idx = self.tem.find_nav_item_with_note(f"{updated_site['site_id']}_overview")
+            self.tem.acquire_montage_at_nav_item(nav_idx=nav_idx, stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], site_id=f"{updated_site['name']}", eucentricity=False)
             
         self._write_sites_csv(updated_sites, filename='tem_stage_positions_refined.csv')
 
@@ -147,7 +155,6 @@ class ExecutiveControls:
 
         return self.site_summaries
 
-    def run_clem_fine_alignment(self):
-        self.mrc.write_mrc_crops(self, )
+    
 
 

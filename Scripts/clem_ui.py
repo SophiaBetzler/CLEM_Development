@@ -1217,7 +1217,7 @@ class RegistrationApp(tk.Tk):
         self.point_pairs     = []
 
         self.flip_x = tk.BooleanVar(value=False)
-        self.flip_y = tk.BooleanVar(value=False)
+        self.flip_y = tk.BooleanVar(value=True)
 
         self.mrc_is_montage    = False
         self.mrc_file_path     = None
@@ -1292,7 +1292,7 @@ class RegistrationApp(tk.Tk):
         self.z_var.set(0)
 
         self.flip_x.set(False)
-        self.flip_y.set(False)
+        self.flip_y.set(True)
 
         self.bc_tiff_panel.build(C, self._on_bc_tiff)
         self.tiff_info_var.set( os.path.basename(os.fspath(data.ome_path)) + "  " + data.info)
@@ -1505,9 +1505,6 @@ class RegistrationApp(tk.Tk):
         ttk.Label(flip_frame, text="Flip:", style="Sm.TLabel").pack(side="left", padx=(0,4))
         ttk.Checkbutton(flip_frame, text="X  (left <-> right)",
                         variable=self.flip_x,
-                        command=self._refresh_tiff).pack(side="left", padx=4)
-        ttk.Checkbutton(flip_frame, text="Y  (top <-> bottom)",
-                        variable=self.flip_y,
                         command=self._refresh_tiff).pack(side="left", padx=4)
 
         outer = ttk.LabelFrame(lf, text="Brightness / Contrast  (per channel)",
@@ -2017,7 +2014,7 @@ class RegistrationApp(tk.Tk):
         ttype    = self.transform_var.get()
 
         try:
-            result = self.correlator.apply_transform(point_pairs=self.point_pairs, transform_type=ttype,
+            result = self.correlator.run_apply_transform(point_pairs=self.point_pairs, transform_type=ttype,
             tiff_stack=self.tiff_stack, mrc_shape=self.mrc_image.shape, flip_x=bool(self.flip_x.get()), flip_y=bool(self.flip_y.get()),
             status_cb=status_cb,)
             self.site_data.set_registration(result, transform_type=ttype,
@@ -2203,7 +2200,7 @@ class RegistrationApp(tk.Tk):
         if fx is not None:
             self.flip_x.set(fx)
         if fy is not None:
-            self.flip_y.set(fy)
+            self.flip_y.set(1)
         self._refresh_tiff()
 
         C, mrc_w, mrc_h = self._warp_channels_with_tform(tform)

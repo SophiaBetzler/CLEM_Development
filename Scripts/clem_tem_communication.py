@@ -1,4 +1,6 @@
 import os
+import argparse
+import time
 import sys
 from pathlib import Path
 sys.path.append(r"C:\Program Files\SerialEM\PythonModules")
@@ -8,6 +10,7 @@ import serialem as sem
 from datetime import datetime
 import numpy as np
 import math
+import tkinter as tk
 
 class TEMComm:
 
@@ -90,7 +93,6 @@ class TEMComm:
     def _save_buffer_image(self, site_id=None, acquisition_type=None, label=None):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()
-
         filename_parts = [site_id, acquisition_type, label, f"mag_{mag}", timestamp, '.mrc']
         filename = "_".join(str(part).strip("_") for part in filename_parts if part is not None and str(part) != "")
 
@@ -100,7 +102,7 @@ class TEMComm:
         else:
             output_dir = self.output_root
 
-        sem.OpenNewFile(output_dir, filename)
+        sem.OpenNewFile(os.path.join(output_dir, filename))
         sem.Save()                 
         sem.CloseFile()
 
@@ -129,20 +131,59 @@ class TEMComm:
         return magnification
 
 
-    def acquire_image(self, mode, imaging_state=None, save=False, site_id=None, label=None):
-        self.prepare_imaging_state(mode=mode, imaging_state=imaging_state,)
-
-        self.ACQUIRE[mode]()
-        if save:
-            self._save_buffer_image(site_id=site_id, acquisition_type="image",label=label)
+    # ---------------------------------------------------------------------------
+    # pause serialEM execution
+    # ---------------------------------------------------------------------------
+    
+    def wait_for_continue_trigger(self, message):
+        win = tk.Tk()
+        win.title("Paused")
+        win.attributes("-topmost", True)
+        tk.Label(win, text=message, padx=20, pady=12, wraplength=320).pack()
+        tk.Button(win, text="Continue", width=16, command=win.quit).pack(pady=(0,12))
+        win.protocol("WM_DELETE_WINDOW", win.quit)
+        win.mainloop()
+        win.destroy()
+        
 
     # ---------------------------------------------------------------------------
     # fundamental microscope controls
     # ---------------------------------------------------------------------------
 
+    def acquire_image(self, mode, imaging_state=None, save=False, site_id=None, label=None, create_map=False):
+        
+        if imaging_state is not None:
+            self.prepare_imaging_state(imaging_state=imaging_state)
+        else:
+            self.prepare_imaging_state(mode=mode)
+
+        self.ACQUIRE[mode]()
+        
+        if create_map:
+            save=True
+        
+        if save:
+            self._save_buffer_image(site_id=site_id, acquisition_type="image",label=label)
+            
+        if create_map:
+            if sem.ReportIfNavOpen() == 0:
+                self._create_nav_file()
+            filename_parts = [site_id, label,'.mrc']
+            filename = "_".join(str(part).strip("_") for part in filename_parts if part is not None and str(part) != "")
+
+            sem.OpenNewFile(os.path.join(self.output_root, filename))
+            sem.S("A")
+            note = f"{label}" if label is not None else (" ")
+            nav_idx = int(sem.NewMap(0, note))
+
+    
+    def find_nav_item_with_note(self, note):
+        idx = int(sem.NavIndexWithNote(note))
+        return idx if idx > 0 else None
+    
+
     def _reset_defocus(self):
-        mag_Index = sem.ReportMagIndex()[0]
-        if mag_Index > 5:
+        if sem.ReportLowDose()[0] == 0:
             sem.SetEucentricFocus()
             sem.Delay(2, 'sec')
             sem.ResetDefocus()
@@ -263,20 +304,38 @@ class TEMComm:
             return None
         sem.GoToLowDoseArea(mode)
         return self.report_matrix("CameraToIS", 0)
+    
+    def return_control_to_serialem(self, message):
+        try:
+            sem.Exit(0)
+        except Exception:
+            pass
+        self.wait_for_continue_trigger(message)
+        print("[INFO] Re-connecting to serialEM.")
+        sem.ConnectToSEM()
+        
+        
 
     # ---------------------------------------------------------------------------
     # Montage control
     # ---------------------------------------------------------------------------
+    
+    def acquire_montage_at_nav_item(self, nav_idx, fov_um_x, fov_um_y, mode='Search', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
+        sem.MoveToNavItem(nav_idx)
+        sem.Delay(1, 'sec')
+        self.acquire_montage(mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, stage_tilt=stage_tilt, site_id=site_id, imaging_state=imaging_state, eucentricity=eucentricity)
+        
 
-    def acquire_montage(self, fov_um_x, fov_um_y, stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
+
+    def acquire_montage(self, fov_um_x, fov_um_y, mode='Search', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
         
-        
-        self.prepare_imaging_state(mode="View", imaging_state=imaging_state)
+    
+        self.prepare_imaging_state(mode=mode, imaging_state=imaging_state)
         if eucentricity is True:
             self.set_eucentricity(level='rough_fine')
         sem.SetImageShift(0.0, 0.0)
 
-        image_properties = self.get_image_properties(mode="View")
+        image_properties = self.get_image_properties(mode=mode, imaging_state=imaging_state)
 
         tile_fov_um_x = image_properties["img_width_px"] * image_properties["pixel_size_um"]
         tile_fov_um_y = image_properties["img_height_px"] * image_properties["pixel_size_um"]

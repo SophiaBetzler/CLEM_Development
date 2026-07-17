@@ -603,7 +603,7 @@ class CLEMPicker:
         for group in groups:
             target = self.refine_target_stage_position(group.tracking)
             self.calculate_image_shift_for_group(group, source=shift_source)
-            ref_crops = self.mrc_reader.write_mrc_crops(mrc_full=self.image, picks=group.picks, fov_um=crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"), skip_pick_id=group.trakcing.pick_id)
+            ref_crops = self.mrc_reader.write_mrc_crops(mrc_full=self.image, picks=group.picks, fov_um=crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"), skip_pick_id=group.tracking.pick_id)
             nav_indices = self.add_group_to_navigator(group)
             xg1_files.append(self.generate_xg1_file(group, output_folder))
 

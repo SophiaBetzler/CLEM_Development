@@ -5,9 +5,14 @@ from clem_tem_communication import TEMComm
 from clem_target_picking import CLEMPicker
 from clem_general import ExecutiveControls
 from pathlib import Path
+import scipy
+from clem_dataclasses import AllSitesDataCollection, SiteDataSummary
 
 
-PATH = r"C:\Users\CZII\Documents\Data\s26jul09a"
+
+
+
+PATH = r"C:\Users\CZII\Documents\Data\s26jul15a"
 SAMPLE_TYPE = 'airyscan'
 OFFLINE = True
 if SAMPLE_TYPE == 'airyscan':
@@ -17,20 +22,23 @@ else:
 
 
 if __name__ == "__main__":
+
+    site_collection = AllSitesDataCollection()
+
     mrc = MRCReader(coord_key="AlignedPieceCoordsVS", path=PATH, refine_alignment=False, section=0)
 
     temcom = TEMComm(rotation="rotation", mrc_reader=mrc, path=PATH, offline=OFFLINE)
 
-    exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, sample_type=SAMPLE_TYPE, milling_angle=MILLING_ANGLE)
+    exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, sample_type=SAMPLE_TYPE, milling_angle=MILLING_ANGLE, site_collection=site_collection)
 
     #exc.run_experiment_setup()
     print(["[INFO] Finished experiment setup."])
     #exc.run_acquire_position_montages()
     print(["[INFO] Finished acquiring position montages."])
     exc.run_clem_alignment()
-    if SAMPLE_TYPE == 'airyscan':
-        exc.run_high_mag_montages()
-        exec.run_clem_alignment()
+    # if SAMPLE_TYPE == 'airyscan':
+    #     exc.run_high_mag_montages()
+    #     exec.run_clem_alignment()
 
     #picker = CLEMPicker(montage=mrc.run_montage_loader_and_create_summary(), navigator=temcom)
     
@@ -38,5 +46,4 @@ if __name__ == "__main__":
     #
     #navc.run_picks_visualization(mrc_file=FILENAME)
     
-
 

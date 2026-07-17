@@ -5,6 +5,23 @@ from typing import Any, Optional
 from dataclasses import dataclass, field
 import os
 
+
+class AllSitesDataCollection:
+    def __init__(self):
+        self.sites = {}
+        self.active_site_id = None
+
+    def add_site(self, site_data):
+        self.sites[site_data.site_id] = site_data
+
+    def get_site(self, site_id):
+        return self.sites.get(site_id)
+
+    @property
+    def active_site(self):
+        return self.sites.get(self.active_site_id)
+
+
 @dataclass
 class Tile:
     """One montage tile. Pixel coords are montage-pixel positions; stage coords
@@ -256,3 +273,146 @@ class SiteDataSummary:
         n_tiles = len(self.mrc.tiles) if self.mrc else 0
         return (f"SiteDataSummary(site_id={self.site_id!r}, loaded={stages}, "
                 f"n_tiles={n_tiles}, n_picks={len(self.picks)})")
+    
+
+# --------------------------------------------------------------------------- #
+# Portable transform record (serialization-friendly)
+# --------------------------------------------------------------------------- #
+# Small parsing helpers so a record can be rebuilt from string cells (CSV) or
+# already-typed values (YAML) without the caller caring which.
+
+def _to_float(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if s == "" or s.lower() in ("none", "null", "na", "n/a"):
+            return None
+        return float(s)
+    return float(value)
+
+
+def _to_int(value):
+    f = _to_float(value)
+    return int(round(f)) if f is not None else None
+
+
+def _to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _to_shape(value):
+    """Accept a list/tuple, a ';'/','-joined string, or None -> tuple[int] | None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (list, tuple)):
+        return tuple(int(round(float(v))) for v in value)
+    parts = [p for p in str(value).replace(",", ";").split(";") if p.strip() != ""]
+    return tuple(int(round(float(p))) for p in parts) if parts else None
+
+
+@dataclass
+class TransformRecord:
+
+    matrix: Optional[Any] = None            # 3x3 homogeneous, row-major: list[list[float]]
+    transform_type: Optional[str] = None
+    flip_x: bool = False
+    flip_y: bool = True                      # Y-flip is the permanent default
+    scale_x: Optional[float] = None
+    scale_y: Optional[float] = None
+    rotation_deg: Optional[float] = None
+    rmse_px: Optional[float] = None
+    fixed_scale: Optional[float] = None      # scale bound used at fit time (if any)
+    scale_tolerance: Optional[float] = None  # +/- fraction around fixed_scale
+    n_pairs: Optional[int] = None
+    mrc_shape: Optional[tuple] = None        # (H, W)
+    tiff_shape: Optional[tuple] = None       # (C, Z, Y, X)
+    pixel_spacing_um: Optional[float] = None
+    created_at: Optional[str] = None
+    source_path: Optional[str] = None        # file it was written to / read from
+
+    @property
+    def mean_scale(self) -> Optional[float]:
+        """Best single scale estimate, preferring an explicit fixed_scale.
+        Used when re-applying to a different image with a scale-limited fit."""
+        if self.fixed_scale is not None:
+            return float(self.fixed_scale)
+        vals = [v for v in (self.scale_x, self.scale_y) if v is not None]
+        return float(sum(vals) / len(vals)) if vals else None
+
+    def to_dict(self) -> dict:
+        """Plain-Python dict (JSON/YAML-safe); matrix as nested float lists."""
+        return {
+            "created_at": self.created_at,
+            "transform_type": self.transform_type,
+            "flip_x": bool(self.flip_x),
+            "flip_y": bool(self.flip_y),
+            "scale_x": self.scale_x,
+            "scale_y": self.scale_y,
+            "rotation_deg": self.rotation_deg,
+            "rmse_px": self.rmse_px,
+            "fixed_scale": self.fixed_scale,
+            "scale_tolerance": self.scale_tolerance,
+            "n_pairs": self.n_pairs,
+            "mrc_shape": list(self.mrc_shape) if self.mrc_shape is not None else None,
+            "tiff_shape": list(self.tiff_shape) if self.tiff_shape is not None else None,
+            "pixel_spacing_um": self.pixel_spacing_um,
+            "matrix": ([[float(v) for v in row] for row in self.matrix]
+                       if self.matrix is not None else None),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TransformRecord":
+        """Rebuild from a dict whose values may be typed (YAML) or strings (CSV)."""
+        matrix = d.get("matrix")
+        if matrix is not None:
+            matrix = [[float(v) for v in row] for row in matrix]
+        return cls(
+            matrix=matrix,
+            transform_type=(d.get("transform_type") or None),
+            flip_x=_to_bool(d.get("flip_x", False)),
+            flip_y=_to_bool(d.get("flip_y", True)),
+            scale_x=_to_float(d.get("scale_x")),
+            scale_y=_to_float(d.get("scale_y")),
+            rotation_deg=_to_float(d.get("rotation_deg")),
+            rmse_px=_to_float(d.get("rmse_px")),
+            fixed_scale=_to_float(d.get("fixed_scale")),
+            scale_tolerance=_to_float(d.get("scale_tolerance")),
+            n_pairs=_to_int(d.get("n_pairs")),
+            mrc_shape=_to_shape(d.get("mrc_shape")),
+            tiff_shape=_to_shape(d.get("tiff_shape")),
+            pixel_spacing_um=_to_float(d.get("pixel_spacing_um")),
+            created_at=(d.get("created_at") or None),
+            source_path=(d.get("source_path") or None),
+        )
+
+    @classmethod
+    def from_registration(cls, reg: "RegistrationSummary", matrix,
+                          pixel_spacing_um=None, created_at=None,
+                          n_pairs=None) -> "TransformRecord":
+        """Build a portable record from an existing RegistrationSummary.
+
+        ``matrix`` must be supplied as a nested float list (the correlator
+        extracts it from the fitted transform) so this module stays free of
+        numpy/skimage dependencies.
+        """
+        fit = reg.fit_info or {}
+        return cls(
+            matrix=[[float(v) for v in row] for row in matrix] if matrix is not None else None,
+            transform_type=reg.transform_type,
+            flip_x=bool(reg.flip_x),
+            flip_y=bool(reg.flip_y),
+            scale_x=fit.get("scale_x"),
+            scale_y=fit.get("scale_y"),
+            rotation_deg=fit.get("rotation_deg", reg.rotation_deg),
+            rmse_px=fit.get("rmse_px"),
+            fixed_scale=fit.get("expected_scale"),
+            scale_tolerance=fit.get("scale_tolerance"),
+            n_pairs=n_pairs if n_pairs is not None else reg.num_point_pairs,
+            pixel_spacing_um=pixel_spacing_um,
+            created_at=created_at,
+        )
