@@ -54,6 +54,7 @@ from clem_correlation import CLEMCorrelator
 from clem_target_picking import CLEMPicker
 from clem_dataclasses import SiteDataSummary, MRCSummary
 from clem_tem_communication import TEMComm
+from clem_mrc_mdoc_reader import MRCReader
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -345,81 +346,9 @@ def parse_mdoc(path):
 # Montage assembler helpers
 # ---------------------------------------------------------------------------
 
-def cosine_weight_map(h, w, feather_px):
-    feather_px = max(1, int(feather_px))
-    def ramp(n):
-        r = np.ones(n, dtype=np.float32)
-        f = min(feather_px, n//2)
-        if f > 0:
-            t = np.linspace(0.0, np.pi/2, f, dtype=np.float32)
-            r[:f] = np.sin(t); r[-f:] = np.sin(t)[::-1]
-        return r
-    return np.outer(ramp(h), ramp(w))
-
-
-def assemble_one_montage(mrc_path, pieces, img_h, img_w,
-                          mont_h, mont_w, feather_px, status_cb=None):
-    z_indices = [p["ZValue"] for p in pieces]
-    n_tiles   = len(z_indices)
-
-    if status_cb:
-        status_cb(f"Reading {n_tiles} tiles from MRC...")
-
-    with mrcfile.open(mrc_path, mode="r", permissive=True) as mrc:
-        data = mrc.data
-        if data is None:
-            raise ValueError("MRC contains no image data.")
-        # A montage MRC is a 3-D stack with one frame per tile.  If we instead
-        # get a single 2-D image, it is already an assembled/blended montage
-        # (or a single-frame image): use it directly rather than trying to
-        # slice tiles out of it, which raised
-        # "too many indices for array: array is 1-dimensional".
-        if data.ndim == 2:
-            if status_cb:
-                status_cb("MRC is a single 2-D image - using it directly "
-                          "(no tile assembly).")
-            return normalize_image(data.astype(np.float32))
-        if data.ndim != 3:
-            raise ValueError(
-                f"Unsupported MRC shape {data.shape}: expected a 3-D tile "
-                f"stack or a 2-D image.")
-        n_frames = data.shape[0]
-        tiles = {}
-        for i, z in enumerate(z_indices):
-            if z < n_frames:
-                tiles[z] = data[z].astype(np.float64)
-                if status_cb and i % 3 == 0:
-                    status_cb(f"Loading tile {i+1}/{n_tiles}...")
-
-    if status_cb: status_cb("Blending tiles...")
-
-    wmap    = cosine_weight_map(img_h, img_w, feather_px).astype(np.float64)
-    canvas  = np.zeros((mont_h, mont_w), dtype=np.float64)
-    weights = np.zeros((mont_h, mont_w), dtype=np.float64)
-
-    for piece in pieces:
-        z_idx = piece["ZValue"]
-        if z_idx not in tiles: continue
-
-        coords = piece.get("AlignedPieceCoords",
-                           piece.get("PieceCoordinates", [0,0,0]))
-        cx = int(round(float(coords[0])))
-        cy = int(round(float(coords[1])))
-
-        tile   = tiles[z_idx]
-        sy0 = max(0,-cy);    sx0 = max(0,-cx)
-        sy1 = min(img_h, mont_h-cy); sx1 = min(img_w, mont_w-cx)
-        if sy1 <= sy0 or sx1 <= sx0: continue
-
-        dy0=cy+sy0; dx0=cx+sx0; dy1=dy0+(sy1-sy0); dx1=dx0+(sx1-sx0)
-        tc = tile[sy0:sy1,sx0:sx1]
-        wc = wmap[sy0:sy1,sx0:sx1]
-        canvas [dy0:dy1,dx0:dx1] += tc*wc
-        weights[dy0:dy1,dx0:dx1] += wc
-
-    valid = weights > 0
-    canvas[valid] /= weights[valid]
-    return normalize_image(canvas.astype(np.float32))
+# The UI no longer implements montage assembly directly. It delegates to the
+# reader, which owns the montage-specific logic and keeps the behavior in one
+# place for both the UI and the picker workflow.
 
 
 # ---------------------------------------------------------------------------
@@ -1686,10 +1615,23 @@ class RegistrationApp(tk.Tk):
             def status_cb(msg):
                 self.status_var.set(msg); self.update_idletasks()
 
-            mont = assemble_one_montage(
-                self.mrc_file_path, pieces,
-                img_h, img_w, mont_h, mont_w,
-                self.mrc_feather_px, status_cb=status_cb)
+            reader = MRCReader(
+                coord_key=self.mrc_reader.coord_key,
+                path=self.mrc_reader.output_root,
+                refine_alignment=self.mrc_reader.refine_alignment,
+                section=sec_idx,
+            )
+            reader.section_pieces = self.mrc_reader.section_pieces
+            reader._global_info = self.mrc_reader._global_info
+            reader.pixel_spacing_um = self.mrc_reader.pixel_spacing_um
+            reader._img_hw = self.mrc_reader._img_hw
+            reader._feather_px = self.mrc_reader._feather_px
+            reader.mrc_image = self.mrc_reader.mrc_image
+            reader.montages = self.mrc_reader.montages
+
+            mont = reader._assemble_montage(
+                self.mrc_file_path, img_h, img_w, self.mrc_feather_px,
+                self.mrc_reader.coord_key, pieces=pieces, status_cb=status_cb)
             self.mrc_montage_cache[sec_idx] = mont
         return self.mrc_montage_cache[sec_idx]
 

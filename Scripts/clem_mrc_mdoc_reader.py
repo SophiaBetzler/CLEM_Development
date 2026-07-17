@@ -503,8 +503,8 @@ class MRCReader:
     # Montage assembly
     # ------------------------------------------------------------------ #
 
-    def _assemble_montage(self, mdoc_filepath, img_h, img_w, feather_px, key):
-        pieces = self.section_pieces[self.section]
+    def _assemble_montage(self, mdoc_filepath, img_h, img_w, feather_px, key, pieces=None, status_cb=None):
+        pieces = pieces or self.section_pieces[self.section]
 
         coords = [(p, float(self._get_coords(p, key)[0]), float(self._get_coords(p, key)[1])) for p in pieces]
 
@@ -527,7 +527,7 @@ class MRCReader:
             if data is None:
                 raise ValueError("MRC contains no image data.")
             if data.ndim == 2:
-                return self._normalize_image(data.astype(np.float32))
+                return self._normalize_image(data.astype(np.float32)), 0.0, 0.0
             if data.ndim != 3:
                 raise ValueError(f"Unsupported MRC shape {data.shape}")
             n_frames = data.shape[0]

@@ -3,6 +3,7 @@ import pickle
 from datetime import datetime
 from typing import Any, Optional
 from dataclasses import dataclass, field
+from pathlib import Path
 import os
 
 
@@ -12,10 +13,23 @@ class AllSitesDataCollection:
         self.active_site_id = None
 
     def add_site(self, site_data):
+        if site_data.site_id is None:
+            raise ValueError("site_data.site_id is required")
         self.sites[site_data.site_id] = site_data
+        self.active_site_id = site_data.site_id
+        return site_data
 
     def get_site(self, site_id):
         return self.sites.get(site_id)
+
+    def set_active_site(self, site_id):
+        self.active_site_id = site_id
+        return self.get_site(site_id)
+
+    def remove_site(self, site_id):
+        self.sites.pop(site_id, None)
+        if self.active_site_id == site_id:
+            self.active_site_id = next(iter(self.sites), None)
 
     @property
     def active_site(self):
@@ -216,8 +230,29 @@ class SiteDataSummary:
         return self.mrc.pixel_spacing_um if self.mrc else None
 
     @property
+    def image(self):
+        if self.mrc is not None and getattr(self.mrc, "image", None) is not None:
+            return self.mrc.image
+        return None
+
+    @image.setter
+    def image(self, value):
+        if self.mrc is None:
+            self.mrc = MRCSummary(image=value)
+        else:
+            self.mrc.image = value
+
+    @property
+    def mrc_full(self):
+        return self.image
+
+    @mrc_full.setter
+    def mrc_full(self, value):
+        self.image = value
+
+    @property
     def montage_image(self):
-        return self.mrc.image if self.mrc else None
+        return self.image
 
     @property
     def warped_channels(self):

@@ -20,8 +20,14 @@ class ExecutiveControls:
         self.sample_type = sample_type
         self.milling_angle = milling_angle
         self.mrc = mrc_reader
+        self.site_collection = site_collection
+        self.site_summaries = {}
 
-        self. montage_settings = {'lamella': {"stage_tilt": -self.milling_angle, "fov_um_x": 15.0, "fov_um_y": 30.0},
+        if self.site_collection is not None:
+            self.tem.site_collection = self.site_collection
+            self.mrc.site_collection = self.site_collection
+
+        self.montage_settings = {'lamella': {"stage_tilt": -self.milling_angle, "fov_um_x": 15.0, "fov_um_y": 30.0},
                                     'airyscan': {"stage_tilt": 0.0, "fov_um_x": 105.0, "fov_um_y": 105.0}}
 
     # ---------------------------------------------------------------------------
@@ -135,6 +141,15 @@ class ExecutiveControls:
             
         self._write_sites_csv(updated_sites, filename='tem_stage_positions_refined.csv')
 
+    def register_site_data(self, site_data, active=True):
+        if self.site_collection is not None:
+            self.site_collection.add_site(site_data)
+            if active:
+                self.site_collection.set_active_site(site_data.site_id)
+        if site_data.site_id is not None:
+            self.site_summaries[site_data.site_id] = site_data
+        return site_data
+
     def run_clem_alignment(self):
         from clem_ui import RegistrationApp   
         from clem_dataclasses import SiteDataSummary
@@ -147,10 +162,12 @@ class ExecutiveControls:
             seen.add(site_id)
             site_data = SiteDataSummary(site_id=site_id, path=os.path.join(self.mrc.output_root, site_id))
             site_data.set_acquisition_from_csv_row(site)
+            self.register_site_data(site_data, active=True)
             ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data, tem_communication=self.tem)
             ui.mainloop()
 
             site_data.save()                    # -> <folder>/<site_id>_<timestamp>.pkl
+            self.register_site_data(site_data, active=True)
             self.site_summaries[site_id] = site
 
         return self.site_summaries

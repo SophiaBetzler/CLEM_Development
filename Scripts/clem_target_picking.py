@@ -28,13 +28,17 @@ class CLEMPicker:
     def __init__(self, site_data, tem_communication):
 
         self.site_data = site_data
+        if site_data.mrc is None:
+            raise ValueError("site_data.mrc must be populated before creating CLEMPicker")
+
         mrc_summary = site_data.mrc
+        mrc_image = site_data.mrc.image
 
         self.pixel_spacing_um = mrc_summary.pixel_spacing_um
         self.coord_field = mrc_summary.coord_field
         self.image_height, self.image_width = mrc_summary.image_height, mrc_summary.image_width
         self.min_x_pixels, self.min_y_pixels = mrc_summary.min_x_pixels, mrc_summary.min_y_pixels
-        self.image = mrc_summary.image
+        self.image = mrc_image
         self.mrc = mrc_summary
         self.output_coord_mode = "image" # or "stage"
         self.nav_map_buffer = "A"
