@@ -127,6 +127,10 @@ class TiffSummary:
     num_z_slices: Optional[int] = None
     stack_height: Optional[int] = None
     stack_width: Optional[int] = None
+    pixel_spacing_um: Optional[float] = None
+    czi_overview: Optional[Any] = None
+    czi_path: Optional[str] = None
+    czi_pixel_sapcing_um: Optional[float] = None
     info: str = ""
 
 
@@ -176,6 +180,12 @@ class SiteDataSummary:
     def populate_tiff(self, mrc_reader, tiff_filepath):
         stack, info = mrc_reader.load_ome_tiff(tiff_filepath)
         c, z, y, x = stack.shape
+        pixel_spacing_um = mrc_reader.read_tiff_pixel_spacing_um(tiff_filepath)
+
+        prev = self.tiff.pixel_spacing_um if self.tiff is not None else None
+        if (prev is not None and pixel_spacing_um is not None) and abs(prev - pixel_spacing_um) > 1e-9:
+            print(f"[INFO] Overwritting TIFF pixel spacing for {self.site_id}: {prev:.6f} -> {pixel_spacing_um: .6f} um/px")
+
         self.tiff = TiffSummary(
             ome_path=os.fspath(tiff_filepath),
             stack_czyx=stack,
@@ -183,9 +193,32 @@ class SiteDataSummary:
             num_z_slices=int(z),
             stack_height=int(y),
             stack_width=int(x),
+            pixel_spacing_um=pixel_spacing_um,
             info=info,
         )
         return self
+    
+    def populate_czi(self, mrc_reader, czi_filepath):
+        stack, info = mrc_reader.load_czi(czi_filepath)
+        pixel_spacing_um = mrc_reader.load_czi_pixel_spacing_um(czi_filepath)
+
+        if self.tiff is None:
+            self.tiff = TiffSummary()
+
+        prev = self.tiff.czi_pixel_spacing_um
+
+        if (prev is not None and pixel_spacing_um is not None
+                and abs(prev - pixel_spacing_um) > 1e-9):
+            print(f"[INFO] Overwriting CZI pixel spacing for {self.site_id}: "
+                  f"{prev:.6f} -> {pixel_spacing_um:.6f} um/px")
+
+        self.tiff.czi_overview = stack
+        self.tiff.czi_path = os.fspath(czi_filepath)
+        self.tiff.czi_pixel_spacing_um = pixel_spacing_um
+        if not self.tiff.info:
+            self.tiff.info = info
+        return self
+
 
     # -------- Registration: from the correlator result dict ---------------- #
     def set_registration(self, correlator_result, transform_type, flip_x=False, flip_y=False):

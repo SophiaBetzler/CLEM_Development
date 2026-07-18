@@ -161,6 +161,15 @@ class MRCReader:
             raise FileNotFoundError(f"No OME-TIFF found in {folder}")
 
         return max(matches, key=lambda p: p.stat().st_mtime)
+    
+    def _find_latest_czi(self, site_id):
+        folder = self._get_site_folder(site_id)
+        matches = list(folder.glob("*.czi"))
+        return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
+    
+    def load_czi_into_data_class(self, site_data, czi_path):
+        site_data.populate_czi(self, czi_path)
+        return site_data
 
     def _find_mdoc_path(self, mrc_filepath):
         directory = os.path.dirname(mrc_filepath)
@@ -233,12 +242,20 @@ class MRCReader:
     # ------------------------------------------------------------------ #
 
     def load_latest_from_site(self, site_id):
-        mrc_path = self._find_latest_montage_mrc(site_id)
-        ome_path = self._find_latest_ome_tiff(site_id)
-        site_data_summary = SiteDataSummary(site_id=site_id, path=str(self._get_site_folder(site_id)))
-        self.load_mrc_into_data_class(site_data_summary, mrc_path)
-        self.load_tiff_into_data_class(site_data_summary, ome_path)
-        return site_data_summary
+        site_data = SiteDataSummary(site_id=site_id, path=str(self._get_site_folder(site_id)))
+        self.load_mrc_into_data_class(site_data, self._find_latest_montage_mrc(site_id))
+
+        try:                                        # OME-TIFF is optional
+            self.load_tiff_into_data_class(site_data, self._find_latest_ome_tiff(site_id))
+        except FileNotFoundError:
+            print(f"[INFO] No OME-TIFF for {site_id}.")
+
+        czi_path = self._find_latest_czi(site_id)   # auto-import CZI overview if present
+        if czi_path is not None:
+            site_data.populate_czi(self, czi_path)
+            print(f"[INFO] Imported CZI overview: {os.path.basename(str(czi_path))}")
+
+        return site_data
     
     def load_mrc_into_data_class(self, site_data, mrc_path):
         self.load_mrc_montage(mrc_path)                 # reader state: montages, section_pieces, _img_hw...
@@ -365,6 +382,110 @@ class MRCReader:
                 ome_path=os.path.abspath(os.fspath(ome_path)),
                 stack_czyx=tiff_stack, num_channels=c, num_z_slices=z, stack_height=y,
                 stack_width=x,info=tiff_info,)
+    
+    @staticmethod
+    def read_tiff_pixel_spacing_um(path):
+        """XY pixel spacing (um/px) for an OME-TIFF or ImageJ/plain TIFF,
+        or None if it can't be determined."""
+        import re
+        _TO_UM = {
+            "m": 1e6, "meter": 1e6, "metre": 1e6,
+            "cm": 1e4, "centimeter": 1e4, "centimetre": 1e4,
+            "mm": 1e3, "millimeter": 1e3, "millimetre": 1e3,
+            "um": 1.0, "\u00b5m": 1.0, "micron": 1.0, "microns": 1.0,
+            "micrometer": 1.0, "micrometre": 1.0,
+            "nm": 1e-3, "nanometer": 1e-3, "nanometre": 1e-3,
+            "inch": 25400.0, "in": 25400.0,
+        }
+
+        def to_um(value, unit):
+            if value is None or unit is None:
+                return None
+            factor = _TO_UM.get(str(unit).strip().lower())
+            return float(value) * factor if factor is not None else None
+
+        with tifffile.TiffFile(path) as tf:
+            ome = tf.ome_metadata
+            if ome:
+                mx = re.search(r'PhysicalSizeX\s*=\s*"([^"]+)"', ome)
+                mu = re.search(r'PhysicalSizeXUnit\s*=\s*"([^"]+)"', ome)
+                if mx:
+                    unit = mu.group(1) if mu else "um"
+                    result = to_um(float(mx.group(1)), unit)
+                    if result:
+                        return result
+
+            ij = tf.imagej_metadata or {}
+            unit = ij.get("unit")
+            page = tf.pages[0]
+            xres = page.tags.get("XResolution")
+            if xres is not None:
+                raw = xres.value
+                if isinstance(raw, (tuple, list)):
+                    num, den = raw[0], raw[1]
+                    px_per_unit = (num / den) if den else 0.0
+                else:
+                    px_per_unit = float(raw)
+                if px_per_unit:
+                    size_in_unit = 1.0 / px_per_unit
+                    if unit is None:
+                        ru = page.tags.get("ResolutionUnit")
+                        ru_val = int(ru.value) if ru is not None else 1
+                        unit = {2: "inch", 3: "cm"}.get(ru_val)
+                    result = to_um(size_in_unit, unit)
+                    if result:
+                        return result
+        return None
+    
+    def load_czi(self, czi_path):
+        czi_path = os.fspath(czi_path)
+        arr, axes = None, None
+        try:
+            from aicspylibczi import CziFile
+            czi = CziFile(czi_path)
+            arr, shp = czi.read_image()
+            axes = "".join(d for d, _ in shp).upper()
+        except ImportError:
+            pass
+        if arr is None:
+            from czifile import CziFile as _GohlkeCzi   # ImportError if neither present
+            with _GohlkeCzi(czi_path) as czi:
+                arr = np.asarray(czi.asarray())
+                axes = "".join(czi.axes).upper()
+
+        arr = np.asarray(arr)
+        for ax in list(axes):                       # collapse anything but C,Z,Y,X
+            if ax not in "CZYX":
+                idx = axes.index(ax)
+                take = arr.shape[idx] // 2 if arr.shape[idx] > 1 else 0
+                arr = arr.take(take, axis=idx)
+                axes = axes.replace(ax, "", 1)
+        for ax in ("C", "Z"):
+            if ax not in axes:
+                arr = arr[np.newaxis]; axes = ax + axes
+        arr = np.transpose(arr, [axes.index(a) for a in "CZYX"])
+
+        normed = np.zeros(arr.shape, dtype=np.float32)
+        for c in range(arr.shape[0]):
+            normed[c] = self._normalize_image(arr[c])
+        info = f"czi shape={tuple(arr.shape)}  ({os.path.basename(czi_path)})"
+        return normed, info
+
+    @staticmethod
+    def read_czi_pixel_spacing_um(path):
+        import re
+        with open(os.fspath(path), "rb") as fh:
+            raw = fh.read()
+        s = raw.find(b"<ImageDocument")
+        e = raw.find(b"</ImageDocument>")
+        xml = (raw[s:e] if (s != -1 and e != -1) else raw).decode("utf-8", "replace")
+        m = re.search(r'<Distance Id="X">\s*<Value>([^<]+)</Value>', xml)
+        return float(m.group(1)) * 1e6 if m else None   # metres -> micrometres
+    
+    def load_czi_into_data_class(self, site_data, czi_path):
+        site_data.populate_czi(self, czi_path)
+        return site_data
+
 
     def parse_mdoc(self, mdoc_filepath):
         mdoc_path = mdoc_filepath
@@ -438,7 +559,8 @@ class MRCReader:
         cw = max(2, int(round(fov_um / spacing_um)))
         return cw
         
-    def write_mrc_crops(self, mrc_full, fov_um, output_root, picks=None, center_px=None, prefix='crop', skip_pick_id=None):
+    def write_mrc_crops(self, mrc_image, fov_um, output_root, picks=None, center_px=None, prefix='crop', skip_pick_id=None):
+        
         def correct_image(crop):
             saturated = crop >= 1.0
             valid = crop[~saturated]
@@ -446,30 +568,32 @@ class MRCReader:
             crop[saturated] = mean
             return crop
         
+        def _write_one(crop, out):
+            with mrcfile.new(out, overwrite=True) as mrc:
+                mrc.set_data(crop)
+                mrc.voxel_size = self.pixel_spacing_um * 10000
+                mrc.update_header_from_data()
+            return out
+        
         cw = self._fov_in_px(fov_um)
         written = []
         if picks is not None:
             for pick in picks:
                 if skip_pick_id is not None and pick.pick_id == skip_pick_id:
                     continue
-                crop = self._crop_centered(mrc_full, pick.pixel_x_um, pick.pixel_y_um, cw)
+                crop = self._crop_centered(mrc_image, pick.pixel_x_um, pick.pixel_y_um, cw)
                 crop = correct_image(crop)
-
                 out = f"{output_root}_{prefix}_{pick.pick_id}.mrc"
+                written.append(_write_one(crop, out))
                 
         elif center_px is not None:
-            crop = self._crop_centered(mrc_full, center_px[0], center_px[1], cw)
+            crop = self._crop_centered(mrc_image, center_px[0], center_px[1], cw)
             crop = correct_image(crop)
             out = f"{output_root}_{prefix}_center.mrc"
+            written.append(_write_one(crop, out))
         
         else:
             raise ValueError("Either picks or center_px most be defined.")
-
-        with mrcfile.new(out, overwrite=True) as mrc:
-                mrc.set_data(crop)
-                mrc.voxel_size = self.pixel_spacing_um * 10000
-                mrc.update_header_from_data()
-                written.append(os.path.basename(out))
 
         return written
     

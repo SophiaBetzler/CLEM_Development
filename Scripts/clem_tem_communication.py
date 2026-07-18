@@ -46,12 +46,15 @@ class TEMComm:
         sem.OpenNavigator(nav_file)
 
 
-    def add_nav_point(self, pick, label, output_coord_mode):
+    def add_nav_point(self, pick, label, output_coord_mode, image_height=None):
         stage_x, stage_y, stage_z = pick.get_stage_position()
-        group_id = sem.GetUniqueNavID()
+        group_id = int(sem.GetUniqueNavID())
         if output_coord_mode == "image":
             z = stage_z if stage_z is not None else -999
-            nav_idx = int(sem.AddImagePosAsNavPoint("A", pick.pixel_x_um, pick.pixel_y_um, z, group_id, 1))
+            if image_height is None:
+                raise ValueError("image_height is required for image-coordinate nav points")
+            pixel_y = image_height - 1 - pick.pixel_y_um          # flip Y to SerialEM's convention
+            nav_idx = int(sem.AddImagePosAsNavPoint("A", pick.pixel_x_um, pixel_y, z, group_id, 1))
         else:
             z = stage_z if stage_z is not None else -999
             nav_idx = int(sem.AddStagePosAsNavPoint(stage_x, stage_y, z, group_id, 1))

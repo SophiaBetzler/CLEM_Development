@@ -468,7 +468,7 @@ class StagePickerWindow(tk.Toplevel):
 
         self.clem_picker = clem_picker
         self.mrc_reader = mrc_reader
-        self._pix_um = clem_picker.mrc.pixel_spacing_um
+        self._pix_um = clem_picker.pixel_spacing_um
 
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
@@ -1173,8 +1173,9 @@ class RegistrationApp(tk.Tk):
     def _display_loaded_site_data(self):            
         if self.site_data.mrc is not None:
             self._display_loaded_mrc_data(self.site_data.mrc)
-        if self.site_data.tiff is not None:
-            self._display_loaded_tiff_data(self.site_data.tiff)
+        t = self.site_data.tiff
+        if t is not None and (t.stack_czyx is not None or t.czi_overview is not None):
+            self._display_loaded_tiff_data(t)
 
     def _display_loaded_mrc_data(self, data):
         self.mrc_file_path = os.fspath(data.mrc_path)
@@ -1210,7 +1211,10 @@ class RegistrationApp(tk.Tk):
         self._on_montage_changed()
     
     def _display_loaded_tiff_data(self, data):
-        self.tiff_stack = data.stack_czyx
+        stack = data.stack_czyx if data.stack_czyx is not None else data.czi_overview
+        if stack is None:
+            return
+        self.tiff_stack = stack
         self._tiff_img_dirty = True
 
         C, Z = self.tiff_stack.shape[:2]
@@ -1224,7 +1228,10 @@ class RegistrationApp(tk.Tk):
         self.flip_y.set(True)
 
         self.bc_tiff_panel.build(C, self._on_bc_tiff)
-        self.tiff_info_var.set( os.path.basename(os.fspath(data.ome_path)) + "  " + data.info)
+
+        src_path = data.ome_path if data.stack_czyx is not None else data.czi_path
+        label = os.path.basename(os.fspath(src_path)) if src_path else "czi overview"
+        self.tiff_info_var.set(label + "  " + (data.info or ""))
 
         self._draw_tiff()
 
@@ -1556,7 +1563,7 @@ class RegistrationApp(tk.Tk):
             return
 
         try:
-            self.mrc_reader.load_mrc_into(self.site_data, path)
+            self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
             messagebox.showerror("MRC montage load error", str(e))
@@ -1569,7 +1576,7 @@ class RegistrationApp(tk.Tk):
             return
 
         try:
-            self.mrc_reader.load_tiff_into(self.site_data, path)
+            self.mrc_reader.load_tiff_into_data_class(site_data=self.site_data, ome_path=path)
             self._display_loaded_site_data()
             self.status_var.set("OME-TIFF loaded.")
         except Exception as e:
@@ -1978,7 +1985,7 @@ class RegistrationApp(tk.Tk):
         n_pairs = result["n_pairs"]
 
 
-        self.status_var.set("{ttype.capitalize()} applied -- {C} ch warped.\n"
+        self.status_var.set(f"{ttype.capitalize()} applied -- {C} ch warped.\n"
                         f"{fit_txt}\nClick Show Overlay.")
         
         msg = (
