@@ -155,7 +155,7 @@ class MRCReader:
     def _find_latest_ome_tiff(self, site_id):
         folder = self._get_site_folder(site_id)
 
-        matches = list(folder.glob("*.ome.tif")) + list(folder.glob("*.ome.tiff"))
+        matches = list(folder.glob("*.ome.tif")) + list(folder.glob("*.ome.tiff")) 
 
         if not matches:
             raise FileNotFoundError(f"No OME-TIFF found in {folder}")
@@ -166,6 +166,18 @@ class MRCReader:
         folder = self._get_site_folder(site_id)
         matches = list(folder.glob("*.czi"))
         return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
+
+    def _fist_latest_transfer(self, site_id):
+        folders = [self._get_site_folder(site_id), Path(self.output_root) / "transforms"]
+        patterns = ("transform_*.haml", "transform_*.yml", "transform_*.csv", "*.txt")
+        matches = []
+        for folder in folders:
+            if folder.is_dir():
+                for pat in patterns:
+                    matches += [p for p in folder.glob(pat) if p.is_file()]
+        if not matches:
+            raise FileNotFoundError(f"No transform found for {site_id!r} in {', '.join(str(f) for f in folders)}")
+        return max(matches, key=lambda p:p.stat().st_mtime)
 
     def _find_mdoc_path(self, mrc_filepath):
         directory = os.path.dirname(mrc_filepath)

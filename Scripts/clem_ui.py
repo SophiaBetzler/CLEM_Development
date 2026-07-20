@@ -1567,6 +1567,7 @@ class RegistrationApp(tk.Tk):
 
         try:
             self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
+            self._display_loaded_mrc_data(self.site_data.mrc)
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
             messagebox.showerror("MRC montage load error", str(e))
@@ -1586,9 +1587,10 @@ class RegistrationApp(tk.Tk):
                 self.mrc_reader.load_czi_into_data_class(site_data=self.site_data, czi_path=path)
             else:
                 self.mrc_reader.load_tiff_into_data_class(site_data=self.site_data, ome_path=path)
-            self._display_loaded_site_data()
+            self.warped_channels = []
+            self._display_loaded_tiff_data(self.site_data.tiff)
+            self._last_tform = None
             self.status_var.set("Image loaded.")
-            self.status_var.set("OME-TIFF loaded.")
         except Exception as e:
             import traceback
             traceback.print_exc()
