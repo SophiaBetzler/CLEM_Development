@@ -130,7 +130,7 @@ class TiffSummary:
     pixel_spacing_um: Optional[float] = None
     czi_overview: Optional[Any] = None
     czi_path: Optional[str] = None
-    czi_pixel_sapcing_um: Optional[float] = None
+    czi_pixel_spacing_um: Optional[float] = None
     info: str = ""
 
 
@@ -200,7 +200,7 @@ class SiteDataSummary:
     
     def populate_czi(self, mrc_reader, czi_filepath):
         stack, info = mrc_reader.load_czi(czi_filepath)
-        pixel_spacing_um = mrc_reader.load_czi_pixel_spacing_um(czi_filepath)
+        pixel_spacing_um = mrc_reader.read_czi_pixel_spacing_um(czi_filepath)
 
         if self.tiff is None:
             self.tiff = TiffSummary()

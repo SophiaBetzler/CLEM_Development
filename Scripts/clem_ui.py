@@ -1228,7 +1228,6 @@ class RegistrationApp(tk.Tk):
         self.flip_y.set(True)
 
         self.bc_tiff_panel.build(C, self._on_bc_tiff)
-
         src_path = data.ome_path if data.stack_czyx is not None else data.czi_path
         label = os.path.basename(os.fspath(src_path)) if src_path else "czi overview"
         self.tiff_info_var.set(label + "  " + (data.info or ""))
@@ -1580,6 +1579,8 @@ class RegistrationApp(tk.Tk):
             self._display_loaded_site_data()
             self.status_var.set("OME-TIFF loaded.")
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("TIFF load error", str(e))
 
     def _on_montage_changed(self):
@@ -2246,7 +2247,7 @@ class RegistrationApp(tk.Tk):
 
             clem_picker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root, mrc_reader=self.mrc_reader)) 
 
-            clem_picker.set_output_coord_mode("image", buffer='A')
+            clem_picker.set_output_coord_mode("stage", buffer='A')
 
             channel_names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)] for i in range(len(self.warped_channels))]
             n_z = (self.site_data.tiff.num_z_slices if self.site_data.tiff is not None else 1)

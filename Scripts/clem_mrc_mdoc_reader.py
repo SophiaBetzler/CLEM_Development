@@ -249,7 +249,7 @@ class MRCReader:
             self.load_tiff_into_data_class(site_data, self._find_latest_ome_tiff(site_id))
         except FileNotFoundError:
             print(f"[INFO] No OME-TIFF for {site_id}.")
-
+        
         czi_path = self._find_latest_czi(site_id)   # auto-import CZI overview if present
         if czi_path is not None:
             try:
