@@ -166,10 +166,6 @@ class MRCReader:
         folder = self._get_site_folder(site_id)
         matches = list(folder.glob("*.czi"))
         return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
-    
-    def load_czi_into_data_class(self, site_data, czi_path):
-        site_data.populate_czi(self, czi_path)
-        return site_data
 
     def _find_mdoc_path(self, mrc_filepath):
         directory = os.path.dirname(mrc_filepath)
@@ -447,8 +443,8 @@ class MRCReader:
             czi = CziFile(czi_path)
             arr, shp = czi.read_image()
             axes = "".join(d for d, _ in shp).upper()
-        except ImportError:
-            pass
+        except Exception:
+            arr = None
         if arr is None:
             from czifile import CziFile as _GohlkeCzi   # ImportError if neither present
             with _GohlkeCzi(czi_path) as czi:

@@ -93,19 +93,19 @@ class ExecutiveControls:
 
     def run_experiment_setup(self):
 
-        #self.tem._create_nav_file()
+        self.tem._create_nav_file()
         input("[ToDO] Please load the experiment file and the settings file. ENTER")
              
-        #self.tem._reset_defocus()
-        #self.tem.precise_stage_move(stage_x_um=0.0, stage_y_um=0.0, stage_z_um=0.0, stage_tilt=0.0)
+        self.tem._reset_defocus()
+        self.tem.precise_stage_move(stage_x_um=0.0, stage_y_um=0.0, stage_z_um=0.0, stage_tilt=0.0)
 
-        #self.tem.acquire_image(mode='View', imaging_state='LMM', create_map=False)
+        self.tem.acquire_image(mode='View', imaging_state='LMM', create_map=False)
 
         input('[ToDO] Move feature suitable for eucentricity alignment to the center of the stage (shift + right click + drag). ENTER')
         
 
-        #self.tem.set_eucentricity(level='rough')
-        #self.tem.acquire_montage(mode='Search', imaging_state='LMM', fov_um_x=3000.0, fov_um_y=3000.0, stage_tilt=0.0, eucentricity=False)
+        self.tem.set_eucentricity(level='rough')
+        self.tem.acquire_montage(mode='Search', imaging_state='LMM', fov_um_x=3000.0, fov_um_y=3000.0, stage_tilt=0.0, eucentricity=False)
         
         self.tem.acquire_image(mode='View', imaging_state='grid_square') 
         self.tem.return_control_to_serialem(message="[ToDo] Run 'align to marker' alignment. ENTER.")
@@ -172,6 +172,6 @@ class ExecutiveControls:
 
         return self.site_summaries
 
-    
-
+    def run_high_magnification_clem_alignment_step(self):
+        tem_stage_positions = self._
 

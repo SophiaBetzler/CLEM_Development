@@ -1168,7 +1168,11 @@ class RegistrationApp(tk.Tk):
         self._build_ui()
 
         if self.site_id is not None:
-            self._load_site_data()
+            try:
+                self._load_site_data()
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                messagebox.showerror("Could not load site data", f"{type(e).__name__}: {e}\n\n The window will open empty.")
 
     def _display_loaded_site_data(self):            
         if self.site_data.mrc is not None:
@@ -1280,7 +1284,7 @@ class RegistrationApp(tk.Tk):
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=6)
 
-        ttk.Button(top, text="Load OME-TIFF",
+        ttk.Button(top, text="Load OME-TIFF / CZI",
                    command=self._load_tiff).pack(side="left", padx=3)
         self.tiff_info_var = tk.StringVar(value="No OME-TIFF loaded")
         ttk.Label(top, textvariable=self.tiff_info_var,
@@ -1569,14 +1573,21 @@ class RegistrationApp(tk.Tk):
 
     def _load_tiff(self):
         path = filedialog.askopenfilename(
-            title="Open OME-TIFF",
-            filetypes=[("TIFF", ("*.tif", "*.tiff")), ("All files", "*")])
+            title="Open OME-TIFF / CZI",
+            filetypes=[("Light microscopy", ("*.tif", "*.tiff", "*.czi")), 
+                       ("TIFF", ("*.tif", "*.tiff")),
+                       ("CZI", "*.czi"), 
+                       ("All files", "*")])
         if not path:
             return
 
         try:
-            self.mrc_reader.load_tiff_into_data_class(site_data=self.site_data, ome_path=path)
+            if os.path.splitext(path)[1].lower() == '.czi':
+                self.mrc_reader.load_czi_into_data_class(site_data=self.site_data, czi_path=path)
+            else:
+                self.mrc_reader.load_tiff_into_data_class(site_data=self.site_data, ome_path=path)
             self._display_loaded_site_data()
+            self.status_var.set("Image loaded.")
             self.status_var.set("OME-TIFF loaded.")
         except Exception as e:
             import traceback
