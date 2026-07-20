@@ -5,6 +5,7 @@ from clem_tem_communication import TEMComm
 from clem_target_picking import CLEMPicker
 from clem_general import ExecutiveControls
 from pathlib import Path
+import traceback
 import scipy
 from clem_dataclasses import AllSitesDataCollection, SiteDataSummary
 
@@ -35,7 +36,12 @@ if __name__ == "__main__":
     print(["[INFO] Finished experiment setup."])
     #exc.run_acquire_position_montages()
     print(["[INFO] Finished acquiring position montages."])
-    exc.run_clem_alignment()
+    try:
+        exc.run_clem_alignment()
+    except Exception:
+        traceback.print_exc()
+        input("Crashed - press ENTER to close")
+
     # if SAMPLE_TYPE == 'airyscan':
     #     exc.run_high_mag_montages()
     #     exec.run_clem_alignment()
@@ -47,3 +53,7 @@ if __name__ == "__main__":
     #navc.run_picks_visualization(mrc_file=FILENAME)
     
 
+# TO DO MONDAY
+# ORDER IN WHICH TIF FILES ARE IMPORTED _ KEYWORD?
+# FIGURE OUT WHY IMAGE SHIFTS POINTS (LOAD SETTINGS FILE?)
+# IMPLEMENTT TWO STAGE APPROACH

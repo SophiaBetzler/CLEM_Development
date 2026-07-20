@@ -252,9 +252,11 @@ class MRCReader:
 
         czi_path = self._find_latest_czi(site_id)   # auto-import CZI overview if present
         if czi_path is not None:
-            site_data.populate_czi(self, czi_path)
-            print(f"[INFO] Imported CZI overview: {os.path.basename(str(czi_path))}")
-
+            try:
+                site_data.populate_czi(self, czi_path)
+                print(f"[INFO] Imported CZI overview: {os.path.basename(str(czi_path))}")
+            except Exception as e:
+                print(f"[WARN] Skipping CZI {os.path.basename(str(czi_path))}: {e}")
         return site_data
     
     def load_mrc_into_data_class(self, site_data, mrc_path):
