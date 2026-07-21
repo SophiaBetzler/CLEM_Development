@@ -611,8 +611,8 @@ class MRCReader:
 
         return written
     
-    def write_multichannel_crops(self, picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root, prefix=""):
-
+    def write_multichannel_crops(self, mrc_full, picks, warp_slice, n_channels, n_z, fov_um, output_root, prefix=""):
+        cw = self._fov_in_px(fov_um)
         stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), dtype=np.float32) for _ in picks]
         for pi, pick in enumerate(picks):
             crop = self._crop_centered_at_pixel_coord(mrc_full, pick.pixel_x_um, pick.pixel_y_um, fov_um)
@@ -622,7 +622,7 @@ class MRCReader:
             for z in range(n_z):
                 full = warp_slice(c, z)
                 for pi, pick in enumerate(picks):
-                    stacks[pi][z, c+1] = self._crop_centered_at_pixel_coord(full, pick.pixel_x_um, pick.pixel_y_um, cw)
+                    stacks[pi][z, c+1] = self._crop_centered_at_pixel_coord(full, pick.pixel_x_um, pick.pixel_y_um, fov_um)
         res = (1.0 / self.pixel_spacing_um) if self.pixel_spacing_um > 0 else 1.0
         labels = (["TEM"]+[f"Ch{c}" for c in range(n_channels)]) * n_z
         written = []
@@ -632,9 +632,9 @@ class MRCReader:
             written.append(os.path.basename(out))
         return written
 
-    def write_fov_crops(self, picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root):
-        tif = self.write_multichannel_crops(picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root)
-        mrc = self.write_mrc_crops(picks, mrc_full, fov_um, output_root)
+    def write_fov_crops(self, mrc_full, picks, warp_slice, n_channels, n_z, fov_um, output_root):
+        tif = self.write_multichannel_crops(mrc_full, picks, warp_slice, n_channels, n_z, fov_um, output_root)
+        mrc = self.write_mrc_crops(mrc_full, picks, fov_um, output_root)
         return {"tif": tif, "mrc": mrc}
 
     # ------------------------------------------------------------------ #
