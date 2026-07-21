@@ -1109,7 +1109,7 @@ class StagePickerWindow(tk.Toplevel):
                     crop_msg = ("\n\nFOV crops skipped: no channel data is "
                                 "available for this picker.")
                 else:
-                   res = self.mrc_reader.write_fov_crops(site_id=self.site_id, warp_slice=self._warp_slice, n_channels=len(self._chan_full), n_z=self._n_z, fov_um=fov, output_root=root)
+                   res = self.mrc_reader.write_fov_crops(site_data=self.site_data, warp_slice=self._warp_slice, n_channels=len(self._chan_full), n_z=self._n_z, fov_um=fov, output_root=root)
                    crop_msg = f"\n\n{len(res['tif'])} tif + {len(res['mrc'])} .mrc crop(s) written."
 
             messagebox.showinfo(

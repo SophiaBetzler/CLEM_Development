@@ -597,14 +597,15 @@ class MRCReader:
                 py = pick.pixel_y_um / self.pixel_spacing_um
                 crop = self._crop_centered_at_pixel_coord(site_data.mrc.image, px, py, fov_um)
                 crop = correct_image(crop)
-                out = self.os.path.join(site_data.path, label, {pick.pick_id}, ".mrc")
+                out = Path(site_data.path) / "picks" / f"{label}_{pick.pick_id}.mrc"
                 written_file_paths.append(_write_one(crop, out))
                 
         elif center_px is not None:
             crop = self._crop_centered_at_pixel_coord(site_data.mrc.image, center_px[0], center_px[1], fov_um)
             crop = correct_image(crop)
-            out = self.os.path.join(site_data.path, label, "_centered.mrc")
-            written_file_paths.append(_write_one(crop, out))
+            out = Path(site_data.path) / "picks" / f"{label}_center.mrc"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            written_file_paths = out
         
         else:
             raise ValueError("Either picks or center_px most be defined.")
@@ -615,20 +616,22 @@ class MRCReader:
         cw = self._fov_in_px(fov_um)
         stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), dtype=np.float32) for _ in site_data.picks]
         for pi, pick in enumerate(site_data.picks):
-            crop = self._crop_centered_at_pixel_coord(site_data.image, pick.pixel_x_um, pick.pixel_y_um, fov_um)
+            crop = self._crop_centered_at_pixel_coord(site_data.mrc.image, pick.pixel_x_um, pick.pixel_y_um, fov_um)
             for z in range(n_z):
                 stacks[pi][z, 0] = crop
         for c in range(n_channels):
             for z in range(n_z):
                 full = warp_slice(c, z)
                 for pi, pick in enumerate(site_data.picks):
-                    stacks[pi][z, c+1] = self._crop_centered_at_pixel_coord(full, pick.pixel_x_um, pick.pixel_y_um, fov_um)
+                    px = pick.pixel_x_um / self.pixel_spacing_um
+                    py = pick.pixel_y_um / self.pixel_spacing_um
+                    stacks[pi][z, c+1] = self._crop_centered_at_pixel_coord(full, py, fov_um)
         res = (1.0 / self.pixel_spacing_um) if self.pixel_spacing_um > 0 else 1.0
         labels = (["TEM"]+[f"Ch{c}" for c in range(n_channels)]) * n_z
         written = []
         for pi, pick in enumerate(site_data.picks):
             out = f"{output_root}{prefix}_{pick.pick_id}.tif"
-            tifffile.imwrite(out, stacks[pi], imagej=True, resolution=(res, res), metadata={"axes": "ZCYX", "unit": "um", "Labels": labels})
+            tifffile.imwrite(out, stacks[pi], imagej=True, resolution=(res, res), metadata={"axes": "ZCYX" ,"unit": "um", "Labels": labels})
             written.append(os.path.basename(out))
         return written
 
@@ -637,6 +640,8 @@ class MRCReader:
         mrc_file_paths = self.write_mrc_crops(site_data, fov_um, output_root)
         for i, pick in enumerate(site_data.picks):
             pick.view_crop_path = mrc_file_paths[i]
+        
+        return {"tif": tif, "mrc": mrc_file_paths}
 
     # ------------------------------------------------------------------ #
     # Montage assembly
