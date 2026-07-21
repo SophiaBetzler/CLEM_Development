@@ -173,8 +173,10 @@ class ExecutiveControls:
         return self.site_summaries
 
     def run_high_magnification_clem_alignment_step(self):
+        self.mrc.write_mrc_crops(self, mrc_image, fov_um, output_root, picks=None, center_px=None, prefix='crop', skip_pick_id=None)
         print('working_on_it')
         # create crop of the center of the montage
+        # make sure to fix the refinemnet function
         # align at higher magnification 
         # acquire 5x5 montage
         # open UI and readin tif file and apply transform. Display the transformed tif on the right

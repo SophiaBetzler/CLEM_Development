@@ -298,8 +298,7 @@ class MRCReader:
     def load_mrc_montage(self, mrc_filepath):
         mdoc_path = self._find_mdoc_path(mrc_filepath=mrc_filepath)
         if mdoc_path is None:
-            raise FileNotFoundError(
-                f"No .mdoc found next to {os.path.basename(mrc_filepath)}.")
+            raise FileNotFoundError(f"No .mdoc found next to {os.path.basename(mrc_filepath)}.")
         print(f"[INFO] Using mdoc: {mdoc_path}")
 
         global_info, pieces, mont_sections = self.parse_mdoc(mdoc_path)
@@ -546,8 +545,9 @@ class MRCReader:
         except (TypeError, ValueError) as exc:
             raise TypeError(f"{name} must be numeric, got {type(value).__name__}") from exc
 
-    @staticmethod
-    def _crop_centered(full, px, py, cw, fill=0.0):
+
+    def _crop_centered_at_pixel_coord(self, full, px, py, fov_um, fill=0.0):
+        cw = self._fov_in_px(fov_um)
         H, W = full.shape
         px = MRCReader._coerce_scalar(px, "px")
         py = MRCReader._coerce_scalar(py, "py")
@@ -584,20 +584,24 @@ class MRCReader:
                 mrc.voxel_size = self.pixel_spacing_um * 10000
                 mrc.update_header_from_data()
             return out
-        
-        cw = self._fov_in_px(fov_um)
+
         written = []
-        if picks is not None:
+        if picks is not None and center_px is not None:
+            raise ValueError("Both picks and center_px cannot both be not None. One must be None.")
+        
+        elif picks is not None:
             for pick in picks:
                 if skip_pick_id is not None and pick.pick_id == skip_pick_id:
                     continue
-                crop = self._crop_centered(mrc_image, pick.pixel_x_um, pick.pixel_y_um, cw)
+                px = pick.pixel_x_um / self.pixel_spacing_um
+                py = pick.pixel_y_um / self.pixel_spacing_um
+                crop = self._crop_centered_at_pixel_coord(mrc_image, px, py, fov_um)
                 crop = correct_image(crop)
                 out = f"{output_root}_{prefix}_{pick.pick_id}.mrc"
                 written.append(_write_one(crop, out))
                 
         elif center_px is not None:
-            crop = self._crop_centered(mrc_image, center_px[0], center_px[1], cw)
+            crop = self._crop_centered_at_pixel_coord(mrc_image, center_px[0], center_px[1], fov_um)
             crop = correct_image(crop)
             out = f"{output_root}_{prefix}_center.mrc"
             written.append(_write_one(crop, out))
@@ -608,17 +612,17 @@ class MRCReader:
         return written
     
     def write_multichannel_crops(self, picks, mrc_full, warp_slice, n_channels, n_z, fov_um, output_root, prefix=""):
-        cw = self._fov_in_px(fov_um)
+
         stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), dtype=np.float32) for _ in picks]
         for pi, pick in enumerate(picks):
-            crop = self._crop_centered(mrc_full, pick.pixel_x_um, pick.pixel_y_um, cw)
+            crop = self._crop_centered_at_pixel_coord(mrc_full, pick.pixel_x_um, pick.pixel_y_um, fov_um)
             for z in range(n_z):
                 stacks[pi][z, 0] = crop
         for c in range(n_channels):
             for z in range(n_z):
                 full = warp_slice(c, z)
                 for pi, pick in enumerate(picks):
-                    stacks[pi][z, c+1] = self._crop_centered(full, pick.pixel_x_um, pick.pixel_y_um, cw)
+                    stacks[pi][z, c+1] = self._crop_centered_at_pixel_coord(full, pick.pixel_x_um, pick.pixel_y_um, cw)
         res = (1.0 / self.pixel_spacing_um) if self.pixel_spacing_um > 0 else 1.0
         labels = (["TEM"]+[f"Ch{c}" for c in range(n_channels)]) * n_z
         written = []

@@ -1112,7 +1112,7 @@ class StagePickerWindow(tk.Toplevel):
         return cw
 
     @staticmethod
-    def _crop_centered(full, px, py, cw):
+    def _crop_centered_at_pixel_coord(full, px, py, cw):
         """Extract a cw x cw window centred on (px, py) in full-res pixels.
         Regions outside the image are zero-padded so every crop is exactly
         cw x cw."""
@@ -1149,7 +1149,7 @@ class StagePickerWindow(tk.Toplevel):
 
         # TEM (channel 0), replicated across z.
         for pi, pick in enumerate(self._picks):
-            tem = self._crop_centered(self._mrc_full, pick["px"], pick["py"], cw)
+            tem = self._crop_centered_at_pixel_coord(self._mrc_full, pick["px"], pick["py"], cw)
             for z in range(Z):
                 stacks[pi][z, 0] = tem
 
@@ -1160,7 +1160,7 @@ class StagePickerWindow(tk.Toplevel):
                 self.update_idletasks()
                 full = self._warp_slice(c, z)
                 for pi, pick in enumerate(self._picks):
-                    stacks[pi][z, c + 1] = self._crop_centered(
+                    stacks[pi][z, c + 1] = self._crop_centered_at_pixel_coord(
                         full, pick["px"], pick["py"], cw)
 
         res    = (1.0 / self._pix_um) if self._pix_um > 0 else 1.0

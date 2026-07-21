@@ -3,9 +3,9 @@ import numpy as np
 from clem_mrc_mdoc_reader import MRCReader
 
 
-def test_crop_centered_accepts_scalar_like_inputs():
+def test_crop_centered_at_pixel_coord_accepts_scalar_like_inputs():
     full = np.arange(100, dtype=np.float32).reshape(10, 10)
-    crop = MRCReader._crop_centered(full, np.array([4.2], dtype=object), np.array([5.8], dtype=object), 3)
+    crop = MRCReader._crop_centered_at_pixel_coord(full, np.array([4.2], dtype=object), np.array([5.8], dtype=object), 3)
     assert crop.shape == (3, 3)
 
 

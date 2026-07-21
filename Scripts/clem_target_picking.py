@@ -343,8 +343,7 @@ class CLEMPicker:
         output_folder = os.path.join(self.site_output_root, output_subfolder)
         os.makedirs(output_folder, exist_ok=True)
         
-        cw = self.mrc_reader._fov_in_px(2.0)
-        montage_crop = self.mrc_reader._crop_centered(self.mrc_summary.image, target_pick.pixel_x_um, target_pick.pixel_y_um, cw)
+        montage_crop = self.mrc_reader._crop_centered_at_pixel_coord(self.mrc_summary.image, target_pick.pixel_x_um, target_pick.pixel_y_um, fov_um=2.0)
         
         montage_ref_path = os.path.join(output_folder, f"{target_pick.pick_id}_crop_montage_reference.mrc")
 

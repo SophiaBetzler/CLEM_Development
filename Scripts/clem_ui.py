@@ -1942,7 +1942,7 @@ class RegistrationApp(tk.Tk):
         if _shift_held(event): return   # Shift+drag pans; don't place a point
         if self.tiff_stack is None or event.xdata is None: return
         _, _, h, w = self.tiff_stack.shape
-        x = (w - 1 - event.xdata) if self.flip_x.get() else event.xdata
+        x = event.xdata
         y = event.ydata
         for pair in reversed(self.point_pairs):
             if "mrc" in pair and "tiff" not in pair:

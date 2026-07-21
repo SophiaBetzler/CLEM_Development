@@ -25,12 +25,10 @@ class CLEMCorrelator:
     def _resolve_flip(self, flip_value, flip_name):
         if flip_name == "flip_y":
             return True
-        if flip_name == "flip_x":
-            return bool(getattr(self.mrc_reader, "MONTAGE_FLIP_X", False))
         if flip_value is not None:
             return bool(flip_value)
-        if self.mrc_reader is None:
-            return False
+        if flip_name == "flip_x":
+            return bool(getattr(self.mrc_reader, "MONTAGE_FLIP_X", False))
         return False
 
     @staticmethod
