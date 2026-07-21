@@ -28,13 +28,13 @@ if __name__ == "__main__":
 
     mrc = MRCReader(coord_key="AlignedPieceCoordsVS", path=PATH, refine_alignment=False, section=0)
 
-    temcom = TEMComm(rotation="rotation", mrc_reader=mrc, path=PATH, offline=OFFLINE)
+    temcom = TEMComm(rotation=False, mrc_reader=mrc, path=PATH, offline=OFFLINE)
 
     exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, sample_type=SAMPLE_TYPE, milling_angle=MILLING_ANGLE, site_collection=site_collection)
 
-    #exc.run_experiment_setup()
+    exc.run_experiment_setup()
     print(["[INFO] Finished experiment setup."])
-    #exc.run_acquire_position_montages()
+    exc.run_acquire_position_montages()
     print(["[INFO] Finished acquiring position montages."])
     try:
         exc.run_clem_alignment()
@@ -42,18 +42,3 @@ if __name__ == "__main__":
         traceback.print_exc()
         input("Crashed - press ENTER to close")
 
-    # if SAMPLE_TYPE == 'airyscan':
-    #     exc.run_high_mag_montages()
-    #     exec.run_clem_alignment()
-
-    #picker = CLEMPicker(montage=mrc.run_montage_loader_and_create_summary(), navigator=temcom)
-    
-
-    #
-    #navc.run_picks_visualization(mrc_file=FILENAME)
-    
-
-# TO DO MONDAY
-# ORDER IN WHICH TIF FILES ARE IMPORTED _ KEYWORD?
-# FIGURE OUT WHY IMAGE SHIFTS POINTS (LOAD SETTINGS FILE?)
-# IMPLEMENTT TWO STAGE APPROACH

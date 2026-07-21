@@ -334,7 +334,7 @@ class TEMComm:
         
 
 
-    def acquire_montage(self, fov_um_x, fov_um_y, mode='Search', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
+    def acquire_montage(self, fov_um_x, fov_um_y, mode='View', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
         
     
         self.prepare_imaging_state(mode=mode, imaging_state=imaging_state)
