@@ -173,5 +173,10 @@ class ExecutiveControls:
         return self.site_summaries
 
     def run_high_magnification_clem_alignment_step(self):
-        tem_stage_positions = self._
+        print('working_on_it')
+        # create crop of the center of the montage
+        # align at higher magnification 
+        # acquire 5x5 montage
+        # open UI and readin tif file and apply transform. Display the transformed tif on the right
+        
 

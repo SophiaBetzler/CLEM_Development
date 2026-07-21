@@ -1520,6 +1520,7 @@ class RegistrationApp(tk.Tk):
             self.mrc_info_var.set(os.path.basename(path)+"  "+info)
             self._hide_montage_nav()
             self._draw_mrc()
+            self.tem.load_montage_in_serialem(path)
             self.status_var.set("MRC loaded.")
         except Exception as e:
             messagebox.showerror("MRC load error", str(e))
@@ -1568,6 +1569,7 @@ class RegistrationApp(tk.Tk):
         try:
             self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
             self._display_loaded_mrc_data(self.site_data.mrc)
+            self.tem.load_montage_in_serialem(self.site_data.mrc.mrc_path)
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
             messagebox.showerror("MRC montage load error", str(e))
@@ -1878,6 +1880,7 @@ class RegistrationApp(tk.Tk):
         for i, pair in enumerate(self.point_pairs):
             if "tiff" in pair:
                 x, y = pair["tiff"]
+
                 ln, = self.ax_tiff.plot(x, y, "o", color=PT_TIFF, markersize=8,
                                         markeredgecolor="white", markeredgewidth=0.8, zorder=5)
                 tx  = self.ax_tiff.text(x+6, y-6, str(i+1), color=PT_TIFF,
@@ -1900,12 +1903,16 @@ class RegistrationApp(tk.Tk):
         if xl is not None: ax.set_xlim(xl); ax.set_ylim(yl)
 
     def _draw_points(self, ax, key, color):
+        _, _, h, w = self.tiff_stack.shape
         for i, pair in enumerate(self.point_pairs):
             if key in pair:
                 x, y = pair[key]
-                ax.plot(x,y,"o",color=color,markersize=8,
+                print(self.flip_x.get())
+                dx = (w - 1 - x) if self.flip_x.get() else x
+                dy = y
+                ax.plot(dx, dy,"o",color=color,markersize=8,
                         markeredgecolor="white",markeredgewidth=0.8,zorder=5)
-                ax.text(x+6,y-6,str(i+1),color=color,
+                ax.text(dx+6, dy-6,str(i+1),color=color,
                         fontsize=9,fontweight="bold",zorder=6)
 
     def _on_click_mrc(self, event):
@@ -1934,7 +1941,9 @@ class RegistrationApp(tk.Tk):
         if event.button!=1 or event.inaxes is not self.ax_tiff: return
         if _shift_held(event): return   # Shift+drag pans; don't place a point
         if self.tiff_stack is None or event.xdata is None: return
-        x, y = event.xdata, event.ydata
+        _, _, h, w = self.tiff_stack.shape
+        x = (w - 1 - event.xdata) if self.flip_x.get() else event.xdata
+        y = event.ydata
         for pair in reversed(self.point_pairs):
             if "mrc" in pair and "tiff" not in pair:
                 pair["tiff"] = (x,y); self._update_tree()
