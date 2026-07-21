@@ -105,9 +105,11 @@ class TEMComm:
         else:
             output_dir = self.output_root
 
-        sem.OpenNewFile(os.path.join(output_dir, filename))
+        file_path = os.path.join(output_dir, filename)
+        sem.OpenNewFile(file_path)
         sem.Save()                 
         sem.CloseFile()
+        return file_path 
 
     def get_image_properties(self, mode, imaging_state=None):
         self.prepare_imaging_state(mode=mode,imaging_state=imaging_state)
@@ -166,7 +168,7 @@ class TEMComm:
             save=True
         
         if save:
-            self._save_buffer_image(site_id=site_id, acquisition_type="image",label=label)
+            file_path = self._save_buffer_image(site_id=site_id, acquisition_type="image", label=label)
             
         if create_map:
             if sem.ReportIfNavOpen() == 0:
@@ -178,6 +180,8 @@ class TEMComm:
             sem.S("A")
             note = f"{label}" if label is not None else (" ")
             nav_idx = int(sem.NewMap(0, note))
+        
+        return file_path
 
     
     def find_nav_item_with_note(self, note):
@@ -425,7 +429,6 @@ class TEMComm:
         print(f"[INFO] The misalignment determined for the final image is{np.linalg.norm(shift[4:6])/1000} um.")
         if np.linalg.norm(shift[4:6]) > 0.1:
             raise RuntimeError("Alignment failed.")
-        self.acquire_image(mode=mode, save=True, label=f"{label}_aligned_target_{mode}")
         stage_x_um, stage_y_um, stage_z_um = self.tem.report_stage_position()[:3]
 
         return stage_x_um, stage_y_um, stage_z_um     
