@@ -175,8 +175,8 @@ class ExecutiveControls:
     def run_high_magnification_clem_alignment_step(self):
         H, W = self.site_data.mrc.image.shape
         center_px = (W / 2.0, H / 2.0)
-        self.mrc.write_mrc_crops(self.site_data.mrc.image, fov_um=2.0, output_root=self.site_data.path, picks=None, center_px=center_px, prefix='crop_center_', skip_pick_id=None)
-        
+        mrc_path = self.mrc.write_mrc_crops(self.site_data, fov_um=2.0, output_root=self.site_data.path, picks=None, center_px=center_px, prefix='crop_center_', skip_pick_id=None)
+        self.tem.align_target_at_higher_mag()
         print('working_on_it')
         # create crop of the center of the montage
         # make sure to fix the refinemnet function

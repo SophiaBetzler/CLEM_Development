@@ -730,7 +730,7 @@ class StagePickerWindow(tk.Toplevel):
             self._status.set("Grouping picks...")
             self.update_idletasks()
             
-            groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(radius_um=7.5, crop_fov=2.0, output_folder=output_folder, shift_source=self._shift_source_var.get())
+            groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(site_id=self.site_id, radius_um=7.5, crop_fov=2.0, output_folder=output_folder, shift_source=self._shift_source_var.get())
 
             
             if not groups:
@@ -1109,7 +1109,7 @@ class StagePickerWindow(tk.Toplevel):
                     crop_msg = ("\n\nFOV crops skipped: no channel data is "
                                 "available for this picker.")
                 else:
-                   res = self.mrc_reader.write_fov_crops(picks=self._picks, mrc_full=self._mrc_full, warp_slice=self._warp_slice, n_channels=len(self._chan_full), n_z=self._n_z, fov_um=fov, output_root=root)
+                   res = self.mrc_reader.write_fov_crops(site_id=self.site_id, warp_slice=self._warp_slice, n_channels=len(self._chan_full), n_z=self._n_z, fov_um=fov, output_root=root)
                    crop_msg = f"\n\n{len(res['tif'])} tif + {len(res['mrc'])} .mrc crop(s) written."
 
             messagebox.showinfo(
@@ -2264,8 +2264,14 @@ class RegistrationApp(tk.Tk):
             from clem_tem_communication import TEMComm
 
             mrc_summary = self.mrc_reader.build_montage_summary(self.mrc_file_path)
-            site_data = SiteDataSummary(site_id='site_001', path='/tmp', mrc=mrc_summary, registration=RegistrationSummary(0), picks=[])
-
+            site_data = SiteDataSummary(
+                                        site_id=self.site_data.site_id,
+                                        path=self.site_data.path,
+                                        mrc=mrc_summary,
+                                        tiff=self.site_data.tiff,
+                                        registration=self.site_data.registration,
+                                        picks=self.site_data.picks,
+                                    )
 
             clem_picker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root, mrc_reader=self.mrc_reader)) 
 
