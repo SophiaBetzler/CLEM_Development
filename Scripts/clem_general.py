@@ -176,6 +176,7 @@ class ExecutiveControls:
         H, W = self.site_data.mrc.image.shape
         center_px = (W / 2.0, H / 2.0)
         self.mrc.write_mrc_crops(self.site_data.mrc.image, fov_um=2.0, output_root=self.site_data.path, picks=None, center_px=center_px, prefix='crop_center_', skip_pick_id=None)
+        
         print('working_on_it')
         # create crop of the center of the montage
         # make sure to fix the refinemnet function

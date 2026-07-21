@@ -383,7 +383,7 @@ class TEMComm:
     # Alignment routines
     # ---------------------------------------------------------------------------
 
-    def run_serialem_alignment_routine(self, buffer, mode, pick_id, mag_compensation=True, debug_display=False, eucentric=False, site_id=None):
+    def run_serialem_alignment_routine(self, buffer, mode, label=None, mag_compensation=True, debug_display=False, eucentric=False):
 
         if eucentric is True:
             self.set_eucentricity(level='fine')
@@ -395,7 +395,7 @@ class TEMComm:
 
         if mag_compensation is True:
             self.sem.AlignBetweenMags(buffer, -1, -1, -1, 0, -1, int(0)) # buffer, center X in the reference, center Y in the reference, max allowed shift (negative means field of view, positive microns), scale (default: 4%), rotation (default: 3 degrees), avoid_image_shift
-            self._save_buffer_image(site_id=site_id, acquisition_type='mag_adjusted_image', label=pick_id)
+            self._save_buffer_image(acquisition_type='mag_adjusted_image', label=label)
             buffer = "Q"
             self.sem.Copy("B", buffer) 
 
@@ -404,7 +404,7 @@ class TEMComm:
         stage_shift = np.array([np.inf, np.inf])
         
         while np.linalg.norm(stage_shift) > 0.1 and iteration < max_iter:
-            self.acquire_image(mode=mode, save=False, site_id=site_id, label=f"pre_align_{pick_id}")
+            self.acquire_image(mode=mode, save=False, label=f"pre_align_{label}")
             sem.AlignTo(buffer, int(1), int(0), int(0), debug) #don't apply imageshift, #trimming, #correlation peak handling
             required_shift = sem.ReportAlignShift()
             stage_shift = np.array(required_shift[4:6]) / 1000
@@ -425,9 +425,36 @@ class TEMComm:
         print(f"[INFO] The misalignment determined for the final image is{np.linalg.norm(shift[4:6])/1000} um.")
         if np.linalg.norm(shift[4:6]) > 0.1:
             raise RuntimeError("Alignment failed.")
-        self.acquire_image(mode=mode, save=True, site_id=site_id, label=f"{pick_id}_aligned_target_{mode}")
-        stage_x_um, stage_y_um, stage_z_um = sem.ReportStageXYZ()
-        return {"site_id": site_id, "pick_id": pick_id, "stage_x_um": stage_x_um, "stage_y_um": stage_y_um, "stage_z_um": stage_z_um, "mode": mode}     
+        self.acquire_image(mode=mode, save=True, label=f"{label}_aligned_target_{mode}")
+        stage_x_um, stage_y_um, stage_z_um = self.tem.report_stage_position()[:3]
+
+        return stage_x_um, stage_y_um, stage_z_um     
+
+    def align_target_at_higher_mag(self, reference_image_path, target_stage_pos=None, pick_id=None, mode ='Record', label='None'):
+        
+        buffer = 'P'  # Persistent buffer
+        
+        if label is None and pick_id is not None:
+            label = pick_id
+        
+        print(f"[INFO] Loading reference and aligning {label}...")
+
+        self.tem._load_mrc_in_nav(reference_image_path, buffer=buffer)
+        if target_stage_pos is not None:
+            self.tem.precise_stage_move(stage_x_um=target_stage_pos[0], stage_y_um=target_stage_pos[1], stage_z_um=target_stage_pos[2])
+        self.tem.acquire_image(mode=mode)
+
+        refined_stage_x, refined_stage_y, refined_stage_z = self.run_serialem_alignment_routine(buffer=buffer, label=label, mode=mode, mag_compensation=True)
+
+        if pick_id is not None:
+            return {
+                        'pick_id': pick_id,
+                        'refined_stage': (refined_stage_x, refined_stage_y, refined_stage_z),
+                    }
+        else:
+            (refined_stage_x, refined_stage_y, refined_stage_z)
+
+
 
     # ---------------------------------------------------------------------------
     # Functions for troubleshooting and debugging

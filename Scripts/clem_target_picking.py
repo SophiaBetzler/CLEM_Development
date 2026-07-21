@@ -335,27 +335,25 @@ class CLEMPicker:
     # Target Refinement
     # ════════════════════════════════════════════════════════════════════════
 
-    def refine_target_stage_position(self, target_pick: Pick,
-                                    output_subfolder: str = 'references') -> Pick:
+    def refine_target_stage_position(self, target_pick: Pick, output_folder = 'references') -> Pick:
         
         print(f"\n[INFO] Refining target {target_pick.pick_id}...")
-        
-        output_folder = os.path.join(self.site_output_root, output_subfolder)
+
         os.makedirs(output_folder, exist_ok=True)
         
-        montage_crop = self.mrc_reader._crop_centered_at_pixel_coord(self.mrc_summary.image, target_pick.pixel_x_um, target_pick.pixel_y_um, fov_um=2.0)
+        montage_crop_at_target_position = self.mrc_reader._crop_centered_at_pixel_coord(self.mrc_summary.image, target_pick.pixel_x_um, target_pick.pixel_y_um, fov_um=2.0)
         
-        montage_ref_path = os.path.join(output_folder, f"{target_pick.pick_id}_crop_montage_reference.mrc")
+        target_crop_ref_path = os.path.join(output_folder, f"{target_pick.pick_id}_target_reference.mrc")
 
-        with mrcfile.new(montage_ref_path, overwrite=True) as mrc:
-            mrc.set_data(montage_crop)
+        with mrcfile.new(target_crop_ref_path, overwrite=True) as mrc:
+            mrc.set_data(montage_crop_at_target_position)
             mrc.voxel_size = self.pixel_spacing_um * 10000
             mrc.update_header_from_data()
 
-        alignment_result = self.align_target_at_higher_mag(
-            pick_id=target_pick.pick_id,
+        alignment_result = self.tem.align_target_at_higher_mag(
+            label=target_pick.pick_id,
             target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
-            reference_image_path=montage_ref_path, mode='Search')
+            reference_image_path=target_crop_ref_path, mode='Search')
         
         refined_x, refined_y, refined_z = alignment_result['refined_stage']
 
@@ -400,32 +398,6 @@ class CLEMPicker:
         target_pick.view_crop_path = view_path
         target_pick.is_tracking_target = True
         target_pick.refinement_quality = 'good'
-
-
-    def align_target_at_higher_mag(self, pick_id: str, target_stage_pos: Tuple[float, float, float],
-                                  reference_image_path: str, mode: str = 'Record') -> Dict:
-        
-        buffer = 'P'  # Persistent buffer
-        
-        print(f"[INFO] Loading reference and aligning {pick_id}...")
-
-        self.tem._load_mrc_in_nav(reference_image_path, buffer=buffer)
-
-        self.tem.precise_stage_move(stage_x_um=target_stage_pos[0], stage_y_um=target_stage_pos[1], stage_z_um=target_stage_pos[2])
-
-        self.tem.acquire_image(mode=mode)
-        
-        # Run alignment routine (includes AlignBetweenMags + fine refinement)
-        print('[INFO] Running SerialEM alignment routine.')
-        self.tem.run_serialem_alignment_routine(buffer=buffer, pick_id=pick_id, mode=mode, mag_compensation=True)
-        
-        # Get refined stage position
-        refined_stage_x, refined_stage_y, refined_stage_z = self.tem.report_stage_position()[:3]
-        
-        return {
-                    'pick_id': pick_id,
-                    'refined_stage': (refined_stage_x, refined_stage_y, refined_stage_z),
-                }
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 8: Image Shift Calculation
@@ -587,7 +559,7 @@ class CLEMPicker:
                 self.refine_target_stage_position(group.tracking)
             self.calculate_image_shifts_for_group(group, source=shift_source)
             ref_crops = self.mrc_reader.write_mrc_crops(mrc_image=self.mrc_summary.image, picks=group.picks,
-                fov_um=crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"),  # was missing output_folder
+                fov_um=crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"),  
                 skip_pick_id=group.tracking.pick_id, )
             nav_indices = self.add_group_to_navigator(group)
             xg1_files.append(self.generate_xg1_file(group, output_folder))
