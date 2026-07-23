@@ -94,6 +94,8 @@ CHANNEL_COLORS = [
 ]
 CHANNEL_COLOR_NAMES = ["green","magenta","cyan","yellow","orange","purple"]
 
+TIFF_DISPLAY_FLIP_Y = True
+
 PT_MRC  = "#FF4444"
 PT_TIFF = "#44AAFF"
 ZOOM_FACTOR = 1.25
@@ -730,7 +732,7 @@ class StagePickerWindow(tk.Toplevel):
             self._status.set("Grouping picks...")
             self.update_idletasks()
             
-            groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(radius_um=7.5, crop_fov=2.0, output_folder=output_folder, shift_source=self._shift_source_var.get())
+            groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(site_id=self.site_id, radius_um=7.5, crop_fov=2.0, output_folder=output_folder, shift_source=self._shift_source_var.get())
 
             
             if not groups:
@@ -1109,7 +1111,7 @@ class StagePickerWindow(tk.Toplevel):
                     crop_msg = ("\n\nFOV crops skipped: no channel data is "
                                 "available for this picker.")
                 else:
-                   res = self.mrc_reader.write_fov_crops(picks=self._picks, mrc_full=self._mrc_full, warp_slice=self._warp_slice, n_channels=len(self._chan_full), n_z=self._n_z, fov_um=fov, output_root=root)
+                   res = self.mrc_reader.write_fov_crops(site_data=self.site_data, warp_slice=self._warp_slice, n_channels=len(self._chan_full), n_z=self._n_z, fov_um=fov, output_root=root)
                    crop_msg = f"\n\n{len(res['tif'])} tif + {len(res['mrc'])} .mrc crop(s) written."
 
             messagebox.showinfo(
@@ -1146,7 +1148,7 @@ class RegistrationApp(tk.Tk):
         self.point_pairs     = []
 
         self.flip_x = tk.BooleanVar(value=False)
-        self.flip_y = tk.BooleanVar(value=True)
+
 
         self.mrc_is_montage    = False
         self.mrc_file_path     = None
@@ -1296,7 +1298,7 @@ class RegistrationApp(tk.Tk):
         self.channel_var  = tk.IntVar(value=0)
         self.channel_spin = ttk.Spinbox(top, from_=0, to=0,
                                         textvariable=self.channel_var,
-                                        width=4, command=self._refresh_tiff)
+                                        width=4, command=self._on_tiff_orientation_changed)
         self.channel_spin.pack(side="left", padx=2)
 
         ttk.Label(top, text="Z:", style="Sm.TLabel").pack(side="left")
@@ -1444,7 +1446,7 @@ class RegistrationApp(tk.Tk):
         ttk.Label(flip_frame, text="Flip:", style="Sm.TLabel").pack(side="left", padx=(0,4))
         ttk.Checkbutton(flip_frame, text="X  (left <-> right)",
                         variable=self.flip_x,
-                        command=self._refresh_tiff).pack(side="left", padx=4)
+                        command=self._on_tiff_flip_changed).pack(side="left", padx=4)
 
         outer = ttk.LabelFrame(lf, text="Brightness / Contrast  (per channel)",
                                 padding=(4,2))
@@ -1880,9 +1882,18 @@ class RegistrationApp(tk.Tk):
         for i, pair in enumerate(self.point_pairs):
             if "tiff" in pair:
                 x, y = pair["tiff"]
+                display_x, display_y = self._flip_tiff_coordinate(x, y)
 
-                ln, = self.ax_tiff.plot(x, y, "o", color=PT_TIFF, markersize=8,
-                                        markeredgecolor="white", markeredgewidth=0.8, zorder=5)
+                ln, = self.ax_tiff.plot(
+                    display_x,
+                    display_y,
+                    "o",
+                    color=PT_TIFF,
+                    markersize=8,
+                    markeredgecolor="white",
+                    markeredgewidth=0.8,
+                    zorder=5,
+                )
                 tx  = self.ax_tiff.text(x+6, y-6, str(i+1), color=PT_TIFF,
                                         fontsize=9, fontweight="bold", zorder=6)
                 self._tiff_pt_artists.extend([ln, tx])
@@ -1893,7 +1904,7 @@ class RegistrationApp(tk.Tk):
     def _get_tiff_slice(self, c, z):
         img = self.tiff_stack[c, z]
         if self.flip_x.get(): img = np.fliplr(img)
-        if self.flip_y.get(): img = np.flipud(img)
+        if TIFF_DISPLAY_FLIP_Y: img = np.flipud(img)
         return img
 
     @staticmethod
@@ -1942,8 +1953,7 @@ class RegistrationApp(tk.Tk):
         if _shift_held(event): return   # Shift+drag pans; don't place a point
         if self.tiff_stack is None or event.xdata is None: return
         _, _, h, w = self.tiff_stack.shape
-        x = event.xdata
-        y = event.ydata
+        x, y = self._flip_tiff_coordinate(event.xdata, event.ydata,)
         for pair in reversed(self.point_pairs):
             if "mrc" in pair and "tiff" not in pair:
                 pair["tiff"] = (x,y); self._update_tree()
@@ -1977,27 +1987,68 @@ class RegistrationApp(tk.Tk):
         self._draw_mrc(keep_view=True); self._draw_tiff(keep_view=True)
         self.status_var.set("Points cleared.")
 
+    def _on_tiff_flip_changed(self):
+        if self.point_pairs:
+            self.point_pairs.clear()
+            self._update_tree()
+
+        self._loaded_record = None
+        self._last_tform = None
+        self.warped_channels.clear()
+
+        self._refresh_tiff()
+
+        self.status_var.set(
+            "TIFF orientation changed. Landmark points were cleared; "
+            "please place them again."
+        )
+
     def _apply_transform(self):
+
         if self.mrc_image is None or self.tiff_stack is None:
             messagebox.showwarning("Missing data","Load both images first."); return
-        
         def status_cb(msg): self.status_var.set(msg); self.update_idletasks()
+        ttype = self.transform_var.get()
 
-        ttype    = self.transform_var.get()
+        # display frame = what's on screen (always Y-flipped; X per checkbox)
+        warp_fx, warp_fy = bool(self.flip_x.get()), bool(self.flip_y.get())
+        # fit reflection: X on -> Case 2 (no reflection, similarity rotates 180);
+        #                 X off -> Case 1 (Y reflection in F)
+        if self.flip_x.get():
+            fit_fx, fit_fy = False, False
+        else:
+            fit_fx, fit_fy = False, bool(self.flip_y.get())
+
+        record  = getattr(self, "_loaded_record", None)
+        n_pairs = sum(1 for p in self.point_pairs if "mrc" in p and "tiff" in p)
+        new_scale = (self.site_data.tiff.pixel_spacing_um / self.mrc_pixel_spacing_um)
 
         try:
-            result = self.correlator.run_apply_transform(point_pairs=self.point_pairs, transform_type=ttype,
-            tiff_stack=self.tiff_stack, mrc_shape=self.mrc_image.shape, flip_x=bool(self.flip_x.get()), flip_y=bool(self.flip_y.get()),
-            status_cb=status_cb,)
+            if record is not None and n_pairs == 0:                 # Stage 1: coarse concentric
+                result = self.correlator.run_apply_loaded_transform(
+                    record, self.tiff_stack, self.mrc_image.shape,
+                    point_pairs=None, fixed_scale=new_scale,
+                    flip_x=record.flip_x, flip_y=record.flip_y, status_cb=status_cb)
+            elif record is not None:                                # Stage 2: fine-tune, scale locked
+                result = self.correlator.run_apply_loaded_transform(
+                    record, self.tiff_stack, self.mrc_image.shape,
+                    point_pairs=self.point_pairs, scale_limited=True,
+                    fixed_scale=new_scale, scale_tolerance=0.05,
+                    flip_x=record.flip_x, flip_y=record.flip_y, status_cb=status_cb)
+            else:                                                   # fresh fit
+                result = self.correlator.run_apply_transform(
+                    point_pairs=self.point_pairs, transform_type=ttype,
+                    tiff_stack=self.tiff_stack, mrc_shape=self.mrc_image.shape,
+                    flip_x=fit_fx, flip_y=fit_fy,
+                    warp_flip_x=warp_fx, warp_flip_y=warp_fy, status_cb=status_cb)
+            rec = result["record"]
+            self._loaded_record = rec                               # so a later fine-tune builds on it
             self.site_data.set_registration(result, transform_type=ttype,
-                                   flip_x=bool(self.flip_x.get()),
-                                   flip_y=bool(self.flip_y.get()))
+                                            flip_x=rec.flip_x, flip_y=rec.flip_y)
         except ValueError as e:
-            messagebox.showwarning("Not enough points", str(e))
-            return
+            messagebox.showwarning("Not enough points", str(e)); return
         except Exception as e:
-            messagebox.showerror("Transform failed", str(e))
-            return
+            messagebox.showerror("Transform failed", str(e)); return
 
         self._last_tform = result["transform"]
         self.warped_channels = result["warped_channels"]
@@ -2033,6 +2084,18 @@ class RegistrationApp(tk.Tk):
             
         messagebox.showinfo("Done", msg)
 
+    def _on_tiff_orientation_changed(self):
+        # The landmarks remain valid because they are stored in raw coordinates,
+        # but an existing transform/record was calculated for another orientation.
+        self._loaded_record = None
+        self._last_tform = None
+        self.warped_channels.clear()
+
+        self._refresh_tiff()
+
+        self.status_var.set(
+            "TIFF X orientation changed. Reapply the transform."
+        ) 
     def _warp_channels_with_tform(self, tform):
         """Warp every channel (max-projected over z) onto the MRC grid using
         the given TIFF->MRC transform, and remember the transform.  Shared by
@@ -2196,6 +2259,18 @@ class RegistrationApp(tk.Tk):
                     output_shape=(mrc_h, mrc_w), order=1,
                     preserve_range=True, mode="constant", cval=0).astype(np.float32)
 
+    def _flip_tiff_coordinate(self, x, y):
+        """Convert raw TIFF ↔ displayed TIFF coordinates."""
+        _, _, h, w = self.tiff_stack.shape
+
+        if self.flip_x.get():
+            x = w - 1.0 - x
+
+        if TIFF_DISPLAY_FLIP_Y:
+            y = h - 1.0 - y
+
+        return float(x), float(y)
+
     def _show_overlay(self):
         if self.mrc_image is None:
             messagebox.showwarning("No MRC","Load MRC first."); return
@@ -2264,8 +2339,14 @@ class RegistrationApp(tk.Tk):
             from clem_tem_communication import TEMComm
 
             mrc_summary = self.mrc_reader.build_montage_summary(self.mrc_file_path)
-            site_data = SiteDataSummary(site_id='site_001', path='/tmp', mrc=mrc_summary, registration=RegistrationSummary(0), picks=[])
-
+            site_data = SiteDataSummary(
+                                        site_id=self.site_data.site_id,
+                                        path=self.site_data.path,
+                                        mrc=mrc_summary,
+                                        tiff=self.site_data.tiff,
+                                        registration=self.site_data.registration,
+                                        picks=self.site_data.picks,
+                                    )
 
             clem_picker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root, mrc_reader=self.mrc_reader)) 
 

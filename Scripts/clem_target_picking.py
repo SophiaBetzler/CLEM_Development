@@ -335,69 +335,42 @@ class CLEMPicker:
     # Target Refinement
     # ════════════════════════════════════════════════════════════════════════
 
-    def refine_target_stage_position(self, target_pick: Pick, output_folder = 'references') -> Pick:
+    def refine_target_stage_position(self, target_pick: Pick, site_id=None) -> Pick:
         
         print(f"\n[INFO] Refining target {target_pick.pick_id}...")
-
-        os.makedirs(output_folder, exist_ok=True)
-        
+  
         montage_crop_at_target_position = self.mrc_reader._crop_centered_at_pixel_coord(self.mrc_summary.image, target_pick.pixel_x_um, target_pick.pixel_y_um, fov_um=2.0)
-        
-        target_crop_ref_path = os.path.join(output_folder, f"{target_pick.pick_id}_target_reference.mrc")
+
+        target_crop_ref_path = os.path.join(site_id.path, f"{target_pick.pick_id}_target_reference.mrc")
 
         with mrcfile.new(target_crop_ref_path, overwrite=True) as mrc:
             mrc.set_data(montage_crop_at_target_position)
             mrc.voxel_size = self.pixel_spacing_um * 10000
             mrc.update_header_from_data()
 
+        target_pick.view_crop_path = target_crop_ref_path
+
         alignment_result = self.tem.align_target_at_higher_mag(
             label=target_pick.pick_id,
             target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
             reference_image_path=target_crop_ref_path, mode='Search')
         
+        target_pick.search_img_path = self.tem.acquire_image(mode='Search', save=True, site_id=site_id, label='tg_s')
         refined_x, refined_y, refined_z = alignment_result['refined_stage']
 
-        alignment_result = self.align_target_at_higher_mag(
-            pick_id=target_pick.pick_id,
+        alignment_result = self.tem.align_target_at_higher_mag(
             target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
-            reference_image_path=montage_ref_path, mode='Record')
+            reference_image_path=target_pick.search_img_path, mode='Record')
+        
+        target_pick.search_img_path = self.tem.acquire_image(mode='Record', save=True, site_id=site_id, label='tg_r')
+        refined_x, refined_y, refined_z = alignment_result['refined_stage']
 
-        record_properties = self.tem.get_image_properties(mode='Record')
-        record_filename = f"{target_pick.pick_id}_record_{record_properties['magnification']}x.mrc"
-        record_path = os.path.join(output_folder, record_filename)
-        self.tem.save_image_from_buffer(output_path=record_path, buffer='B')
-  
-        search_properties = self.tem.acquire_image(mode='Search')
-        
-        view_image = self.tem.get_image_from_buffer(buffer='A')
-        img_props = self.tem.get_image_properties()
-        
-        fov_px = int(5.0 / img_props['pixel_size_um'])
-        center_y, center_x = view_image.shape[0] // 2, view_image.shape[1] // 2
-        
-        y0 = max(0, center_y - fov_px // 2)
-        y1 = min(view_image.shape[0], center_y + fov_px // 2)
-        x0 = max(0, center_x - fov_px // 2)
-        x1 = min(view_image.shape[1], center_x + fov_px // 2)
-        
-        view_crop = view_image[y0:y1, x0:x1].astype(np.float32)
-        
-        view_filename = f"{target_pick.pick_id}_view_{search_properties['magnification']}x.mrc"
-        view_path = os.path.join(output_folder, view_filename)
-        
-        with mrcfile.new(view_path, overwrite=True) as mrc:
-            mrc.set_data(view_crop)
-            mrc.voxel_size = img_props['pixel_size_um'] * 10000
-            mrc.update_header_from_data()
-        
-        # UPDATE Pick object with refinement data
+
         target_pick.refined_stage_x = refined_x
         target_pick.refined_stage_y = refined_y
         target_pick.refined_stage_z = refined_z
-        target_pick.record_img_path = record_path
-        target_pick.view_crop_path = view_path
-        target_pick.is_tracking_target = True
-        target_pick.refinement_quality = 'good'
+        target_pick.refinement_quality='good'
+
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 8: Image Shift Calculation
@@ -544,7 +517,7 @@ class CLEMPicker:
     # Run paceTomo target/group generation for all picks/groups
     # ════════════════════════════════════════════════════════════════════════
     
-    def run_create_groups_for_pacetomo(self, radius_um=7.5, crop_fov=2.0, output_folder=None, shift_source='image'):
+    def run_create_groups_for_pacetomo(self, site_id, radius_um=7.5, crop_fov=2.0, output_folder=None, shift_source='image'):
 
         if output_folder is None:
             output_folder = self.site_output_root          # was self.site_output.root
@@ -556,7 +529,7 @@ class CLEMPicker:
         xg1_files = []
         for group in groups:
             if not self.tem.offline:                        # refine needs the scope
-                self.refine_target_stage_position(group.tracking)
+                self.refine_target_stage_position(target_pick=group.tracking, site_id=site_id)
             self.calculate_image_shifts_for_group(group, source=shift_source)
             ref_crops = self.mrc_reader.write_mrc_crops(mrc_image=self.mrc_summary.image, picks=group.picks,
                 fov_um=crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"),  

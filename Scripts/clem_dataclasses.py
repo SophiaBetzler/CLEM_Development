@@ -63,6 +63,7 @@ class Pick:
     refined_stage_z: Optional[float] = None
 
     record_img_path: Optional[str] = None
+    search_img_path: Optional[str] = None
     view_crop_path: Optional[str] = None
 
     image_shift_x: Optional[float] = None
@@ -91,7 +92,8 @@ class Pick:
 class TargetGroup:
     group_id: str
     tracking: Pick
-    picks: list = field(default_factory=list)   # list[Pick]
+    picks: list = field(default_factory=list)  
+
  
 
 # --------------------------------------------------------------------------- #
