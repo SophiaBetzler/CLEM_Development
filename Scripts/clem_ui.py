@@ -94,6 +94,8 @@ CHANNEL_COLORS = [
 ]
 CHANNEL_COLOR_NAMES = ["green","magenta","cyan","yellow","orange","purple"]
 
+TIFF_DISPLAY_FLIP_Y = True
+
 PT_MRC  = "#FF4444"
 PT_TIFF = "#44AAFF"
 ZOOM_FACTOR = 1.25
@@ -1146,7 +1148,7 @@ class RegistrationApp(tk.Tk):
         self.point_pairs     = []
 
         self.flip_x = tk.BooleanVar(value=False)
-        self.flip_y = tk.BooleanVar(value=True)
+
 
         self.mrc_is_montage    = False
         self.mrc_file_path     = None
@@ -1296,7 +1298,7 @@ class RegistrationApp(tk.Tk):
         self.channel_var  = tk.IntVar(value=0)
         self.channel_spin = ttk.Spinbox(top, from_=0, to=0,
                                         textvariable=self.channel_var,
-                                        width=4, command=self._refresh_tiff)
+                                        width=4, command=self._on_tiff_orientation_changed)
         self.channel_spin.pack(side="left", padx=2)
 
         ttk.Label(top, text="Z:", style="Sm.TLabel").pack(side="left")
@@ -1444,7 +1446,7 @@ class RegistrationApp(tk.Tk):
         ttk.Label(flip_frame, text="Flip:", style="Sm.TLabel").pack(side="left", padx=(0,4))
         ttk.Checkbutton(flip_frame, text="X  (left <-> right)",
                         variable=self.flip_x,
-                        command=self._refresh_tiff).pack(side="left", padx=4)
+                        command=self._on_tiff_flip_changed).pack(side="left", padx=4)
 
         outer = ttk.LabelFrame(lf, text="Brightness / Contrast  (per channel)",
                                 padding=(4,2))
@@ -1880,9 +1882,18 @@ class RegistrationApp(tk.Tk):
         for i, pair in enumerate(self.point_pairs):
             if "tiff" in pair:
                 x, y = pair["tiff"]
+                display_x, display_y = self._flip_tiff_coordinate(x, y)
 
-                ln, = self.ax_tiff.plot(x, y, "o", color=PT_TIFF, markersize=8,
-                                        markeredgecolor="white", markeredgewidth=0.8, zorder=5)
+                ln, = self.ax_tiff.plot(
+                    display_x,
+                    display_y,
+                    "o",
+                    color=PT_TIFF,
+                    markersize=8,
+                    markeredgecolor="white",
+                    markeredgewidth=0.8,
+                    zorder=5,
+                )
                 tx  = self.ax_tiff.text(x+6, y-6, str(i+1), color=PT_TIFF,
                                         fontsize=9, fontweight="bold", zorder=6)
                 self._tiff_pt_artists.extend([ln, tx])
@@ -1893,7 +1904,7 @@ class RegistrationApp(tk.Tk):
     def _get_tiff_slice(self, c, z):
         img = self.tiff_stack[c, z]
         if self.flip_x.get(): img = np.fliplr(img)
-        if self.flip_y.get(): img = np.flipud(img)
+        if TIFF_DISPLAY_FLIP_Y: img = np.flipud(img)
         return img
 
     @staticmethod
@@ -1942,8 +1953,7 @@ class RegistrationApp(tk.Tk):
         if _shift_held(event): return   # Shift+drag pans; don't place a point
         if self.tiff_stack is None or event.xdata is None: return
         _, _, h, w = self.tiff_stack.shape
-        x = event.xdata
-        y = event.ydata
+        x, y = self._flip_tiff_coordinate(event.xdata, event.ydata,)
         for pair in reversed(self.point_pairs):
             if "mrc" in pair and "tiff" not in pair:
                 pair["tiff"] = (x,y); self._update_tree()
@@ -1977,8 +1987,24 @@ class RegistrationApp(tk.Tk):
         self._draw_mrc(keep_view=True); self._draw_tiff(keep_view=True)
         self.status_var.set("Points cleared.")
 
+    def _on_tiff_flip_changed(self):
+        if self.point_pairs:
+            self.point_pairs.clear()
+            self._update_tree()
+
+        self._loaded_record = None
+        self._last_tform = None
+        self.warped_channels.clear()
+
+        self._refresh_tiff()
+
+        self.status_var.set(
+            "TIFF orientation changed. Landmark points were cleared; "
+            "please place them again."
+        )
+
     def _apply_transform(self):
-        
+
         if self.mrc_image is None or self.tiff_stack is None:
             messagebox.showwarning("Missing data","Load both images first."); return
         def status_cb(msg): self.status_var.set(msg); self.update_idletasks()
@@ -2058,6 +2084,18 @@ class RegistrationApp(tk.Tk):
             
         messagebox.showinfo("Done", msg)
 
+    def _on_tiff_orientation_changed(self):
+        # The landmarks remain valid because they are stored in raw coordinates,
+        # but an existing transform/record was calculated for another orientation.
+        self._loaded_record = None
+        self._last_tform = None
+        self.warped_channels.clear()
+
+        self._refresh_tiff()
+
+        self.status_var.set(
+            "TIFF X orientation changed. Reapply the transform."
+        ) 
     def _warp_channels_with_tform(self, tform):
         """Warp every channel (max-projected over z) onto the MRC grid using
         the given TIFF->MRC transform, and remember the transform.  Shared by
@@ -2220,6 +2258,18 @@ class RegistrationApp(tk.Tk):
         return warp(self._get_tiff_slice(c, z), self._last_tform.inverse,
                     output_shape=(mrc_h, mrc_w), order=1,
                     preserve_range=True, mode="constant", cval=0).astype(np.float32)
+
+    def _flip_tiff_coordinate(self, x, y):
+        """Convert raw TIFF ↔ displayed TIFF coordinates."""
+        _, _, h, w = self.tiff_stack.shape
+
+        if self.flip_x.get():
+            x = w - 1.0 - x
+
+        if TIFF_DISPLAY_FLIP_Y:
+            y = h - 1.0 - y
+
+        return float(x), float(y)
 
     def _show_overlay(self):
         if self.mrc_image is None:
