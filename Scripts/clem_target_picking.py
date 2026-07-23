@@ -358,7 +358,7 @@ class CLEMPicker:
         target_pick.search_img_path = self.tem.acquire_image(mode='Search', save=True, site_id=site_id, label='tg_s')
         refined_x, refined_y, refined_z = alignment_result['refined_stage']
 
-        alignment_result = self.align_target_at_higher_mag(
+        alignment_result = self.tem.align_target_at_higher_mag(
             target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
             reference_image_path=target_pick.search_img_path, mode='Record')
         

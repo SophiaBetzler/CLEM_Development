@@ -1978,26 +1978,51 @@ class RegistrationApp(tk.Tk):
         self.status_var.set("Points cleared.")
 
     def _apply_transform(self):
+        
         if self.mrc_image is None or self.tiff_stack is None:
             messagebox.showwarning("Missing data","Load both images first."); return
-        
         def status_cb(msg): self.status_var.set(msg); self.update_idletasks()
+        ttype = self.transform_var.get()
 
-        ttype    = self.transform_var.get()
+        # display frame = what's on screen (always Y-flipped; X per checkbox)
+        warp_fx, warp_fy = bool(self.flip_x.get()), bool(self.flip_y.get())
+        # fit reflection: X on -> Case 2 (no reflection, similarity rotates 180);
+        #                 X off -> Case 1 (Y reflection in F)
+        if self.flip_x.get():
+            fit_fx, fit_fy = False, False
+        else:
+            fit_fx, fit_fy = False, bool(self.flip_y.get())
+
+        record  = getattr(self, "_loaded_record", None)
+        n_pairs = sum(1 for p in self.point_pairs if "mrc" in p and "tiff" in p)
+        new_scale = (self.site_data.tiff.pixel_spacing_um / self.mrc_pixel_spacing_um)
 
         try:
-            result = self.correlator.run_apply_transform(point_pairs=self.point_pairs, transform_type=ttype,
-            tiff_stack=self.tiff_stack, mrc_shape=self.mrc_image.shape, flip_x=bool(self.flip_x.get()), flip_y=bool(self.flip_y.get()),
-            status_cb=status_cb,)
+            if record is not None and n_pairs == 0:                 # Stage 1: coarse concentric
+                result = self.correlator.run_apply_loaded_transform(
+                    record, self.tiff_stack, self.mrc_image.shape,
+                    point_pairs=None, fixed_scale=new_scale,
+                    flip_x=record.flip_x, flip_y=record.flip_y, status_cb=status_cb)
+            elif record is not None:                                # Stage 2: fine-tune, scale locked
+                result = self.correlator.run_apply_loaded_transform(
+                    record, self.tiff_stack, self.mrc_image.shape,
+                    point_pairs=self.point_pairs, scale_limited=True,
+                    fixed_scale=new_scale, scale_tolerance=0.05,
+                    flip_x=record.flip_x, flip_y=record.flip_y, status_cb=status_cb)
+            else:                                                   # fresh fit
+                result = self.correlator.run_apply_transform(
+                    point_pairs=self.point_pairs, transform_type=ttype,
+                    tiff_stack=self.tiff_stack, mrc_shape=self.mrc_image.shape,
+                    flip_x=fit_fx, flip_y=fit_fy,
+                    warp_flip_x=warp_fx, warp_flip_y=warp_fy, status_cb=status_cb)
+            rec = result["record"]
+            self._loaded_record = rec                               # so a later fine-tune builds on it
             self.site_data.set_registration(result, transform_type=ttype,
-                                   flip_x=bool(self.flip_x.get()),
-                                   flip_y=bool(self.flip_y.get()))
+                                            flip_x=rec.flip_x, flip_y=rec.flip_y)
         except ValueError as e:
-            messagebox.showwarning("Not enough points", str(e))
-            return
+            messagebox.showwarning("Not enough points", str(e)); return
         except Exception as e:
-            messagebox.showerror("Transform failed", str(e))
-            return
+            messagebox.showerror("Transform failed", str(e)); return
 
         self._last_tform = result["transform"]
         self.warped_channels = result["warped_channels"]

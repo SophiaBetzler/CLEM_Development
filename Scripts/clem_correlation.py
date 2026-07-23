@@ -249,24 +249,31 @@ class CLEMCorrelator:
         return warped_channels
 
 
-    def run_apply_transform(self, point_pairs, transform_type, tiff_stack, mrc_shape, flip_x=None, flip_y=None, status_cb=None,
-                        initial_transform=None, predefined=None, predefined_transform=None, fixed_scale=None,
-                        scale_tolerance=0.05, tiff_shape=None, auto_save=True, save_dir=None, save_format="auto"):
+    def run_apply_transform(self, point_pairs, transform_type, tiff_stack, mrc_shape,
+                        flip_x=None, flip_y=None, warp_flip_x=None, warp_flip_y=None,
+                        status_cb=None, initial_transform=None, predefined=None,
+                        predefined_transform=None, fixed_scale=None, scale_tolerance=0.05,
+                        tiff_shape=None, auto_save=True, save_dir=None, save_format="auto"):
 
-        tform, fit_info, n_pairs = self.fit_tiff_to_mrc(point_pairs,transform_type,predefined=predefined,
-            predefined_transform=predefined_transform, tiff_shape=tiff_shape or tiff_stack.shape,
-            fixed_scale=fixed_scale, scale_tolerance=scale_tolerance, flip_x=flip_x, flip_y=flip_y,
-            initial_transform=initial_transform,)
+        tform, fit_info, n_pairs = self.fit_tiff_to_mrc(
+            point_pairs, transform_type, predefined=predefined,
+            predefined_transform=predefined_transform,
+            tiff_shape=tiff_shape or tiff_stack.shape,
+            fixed_scale=fixed_scale, scale_tolerance=scale_tolerance,
+            flip_x=flip_x, flip_y=flip_y, initial_transform=initial_transform)
 
-        warped_channels = self.warp_channels_to_mrc(tiff_stack=tiff_stack, tform=tform, mrc_shape=mrc_shape, flip_x=flip_x, flip_y=flip_y,
-                                                    status_cb=status_cb,)
+        wfx = flip_x if warp_flip_x is None else warp_flip_x     # warp follows the DISPLAY
+        wfy = flip_y if warp_flip_y is None else warp_flip_y
+        warped_channels = self.warp_channels_to_mrc(
+            tiff_stack=tiff_stack, tform=tform, mrc_shape=mrc_shape,
+            flip_x=wfx, flip_y=wfy, status_cb=status_cb)
 
         record = self._build_transform_record(
             tform, transform_type, fit_info=fit_info, n_pairs=n_pairs,
-            flip_x=flip_x, flip_y=flip_y, mrc_shape=mrc_shape,
-            tiff_shape=tiff_shape or tiff_stack.shape,
-            fixed_scale=fixed_scale, scale_tolerance=scale_tolerance,
-        )
+            flip_x=wfx, flip_y=wfy,                              # store the WARP (display) flip
+            mrc_shape=mrc_shape, tiff_shape=tiff_shape or tiff_stack.shape,
+            fixed_scale=fixed_scale, scale_tolerance=scale_tolerance)
+        
 
         result = {
                     "transform": tform,
@@ -547,25 +554,30 @@ class CLEMCorrelator:
                                flip_x=None, flip_y=None, status_cb=None,
                                auto_save=False, save_dir=None, save_format="auto"):
 
-        if isinstance(record, str):                 # allow passing a path directly
+        if isinstance(record, str):
             record = self.load_transform(record)
+        if flip_x is None: flip_x = record.flip_x        # use the frame the matrix was built in
+        if flip_y is None: flip_y = record.flip_y
 
         if point_pairs is None:
             tform = self.transform_from_record(record)
             note = "re-applied stored transform (no re-fit)"
             new_record = record
             if fixed_scale is not None:
-                # Rescale the stored transform about the image centre, no pairs needed.
-                center = self._image_center(tiff_stack.shape)
-                if center is None:
-                    center = np.zeros(2)
-                matrix, stored = self._rescale_matrix(tform.params, fixed_scale, center)
+                old_tform  = self.transform_from_record(record)
+                old_center = self._image_center(record.tiff_shape)
+                new_center = self._image_center(tiff_stack.shape)
+                if old_center is None: old_center = new_center
+                dst_anchor = old_tform(np.atleast_2d(old_center))[0]
+                matrix, stored = self._rescale_matrix(
+                    old_tform.params, fixed_scale,
+                    src_anchor=new_center, dst_anchor=dst_anchor)
                 tform = ProjectiveTransform(matrix=matrix)
-                note = f"re-applied stored transform, rescaled {stored:.4f}->{float(fixed_scale):.4f}"
+                note = f"re-applied concentric, rescaled {stored:.4f}->{float(fixed_scale):.4f}"
                 new_record = self._build_transform_record(
                     tform, record.transform_type or "similarity",
                     fit_info={"scale_x": fixed_scale, "scale_y": fixed_scale,
-                              "rotation_deg": record.rotation_deg},
+                            "rotation_deg": record.rotation_deg},
                     n_pairs=0, flip_x=flip_x, flip_y=flip_y,
                     mrc_shape=mrc_shape, tiff_shape=tiff_stack.shape)
             fit_info = {
