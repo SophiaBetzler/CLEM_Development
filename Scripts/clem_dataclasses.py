@@ -63,7 +63,6 @@ class Pick:
     refined_stage_z: Optional[float] = None
 
     record_img_path: Optional[str] = None
-    search_img_path: Optional[str] = None
     view_crop_path: Optional[str] = None
 
     image_shift_x: Optional[float] = None
@@ -92,8 +91,7 @@ class Pick:
 class TargetGroup:
     group_id: str
     tracking: Pick
-    picks: list = field(default_factory=list)  
-
+    picks: list = field(default_factory=list)   # list[Pick]
  
 
 # --------------------------------------------------------------------------- #
@@ -401,7 +399,8 @@ class TransformRecord:
     n_pairs: Optional[int] = None
     mrc_shape: Optional[tuple] = None        # (H, W)
     tiff_shape: Optional[tuple] = None       # (C, Z, Y, X)
-    pixel_spacing_um: Optional[float] = None
+    pixel_spacing_um: Optional[float] = None      # MRC (montage) um/px
+    tiff_pixel_spacing_um: Optional[float] = None  # TIFF um/px (for concentric re-apply)
     created_at: Optional[str] = None
     source_path: Optional[str] = None        # file it was written to / read from
 
@@ -431,6 +430,7 @@ class TransformRecord:
             "mrc_shape": list(self.mrc_shape) if self.mrc_shape is not None else None,
             "tiff_shape": list(self.tiff_shape) if self.tiff_shape is not None else None,
             "pixel_spacing_um": self.pixel_spacing_um,
+            "tiff_pixel_spacing_um": self.tiff_pixel_spacing_um,
             "matrix": ([[float(v) for v in row] for row in self.matrix]
                        if self.matrix is not None else None),
         }
@@ -456,6 +456,7 @@ class TransformRecord:
             mrc_shape=_to_shape(d.get("mrc_shape")),
             tiff_shape=_to_shape(d.get("tiff_shape")),
             pixel_spacing_um=_to_float(d.get("pixel_spacing_um")),
+            tiff_pixel_spacing_um=_to_float(d.get("tiff_pixel_spacing_um")),
             created_at=(d.get("created_at") or None),
             source_path=(d.get("source_path") or None),
         )

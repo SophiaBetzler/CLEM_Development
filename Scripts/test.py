@@ -1273,7 +1273,6 @@ class RegistrationApp(tk.Tk):
         self.point_pairs     = []
 
         self.flip_x = tk.BooleanVar(value=False)
-        self.flip_y = tk.BooleanVar(value=False)
 
         self.mrc_is_montage    = False
         self.mrc_file_path     = None

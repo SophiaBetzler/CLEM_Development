@@ -45,7 +45,7 @@ class CLEMPicker:
         self.H, self.W = self.mrc_summary.image.shape[:2]
         
         self.flip_x = bool(getattr(self.mrc_summary, 'flip_x', False))
-        self.flip_y = bool(getattr(self.mrc_summary, 'flip_y', False))
+        self.flip_y = True
 
         theta = np.deg2rad(getattr(self.mrc_summary, 'rotation_deg', 0.0))
         self.cos, self.sin = np.cos(theta), np.sin(theta)

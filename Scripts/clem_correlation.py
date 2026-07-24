@@ -1,456 +1,315 @@
-import csv
+"""
+CLEM correlation: fit and apply a TIFF -> MRC transform.
+
+Simplified coordinate model
+---------------------------
+The TIFF's rotation/flip relative to the MRC is arbitrary, so instead of
+modelling a mirror in the transform we flip the TIFF *for display* until it
+matches the (always Y-flipped) MRC, and pick landmarks on that matched view.
+Because the images are then in the same handedness, the transform is ALWAYS a
+plain proper fit -- there is no reflection matrix and no "case" to choose.
+
+Frames
+  * Landmark picks are in the DISPLAY frame of each image (what the user
+    clicked): display TIFF pixels for "tiff", display MRC pixels for "mrc".
+  * The fitted transform maps DISPLAY-TIFF pixels -> DISPLAY-MRC pixels and is
+    fit directly with estimate_transform (no pre/post reflection).
+  * Warping flips the raw TIFF by (flip_x, flip_y) -- the TIFF display flip the
+    user chose -- to reproduce the matched view, then warps it with the fitted
+    transform into the DISPLAY-MRC frame.
+  * flip_x / flip_y describe the TIFF display orientation ONLY; they are stored
+    in the record so a re-applied transform can reproduce the same matched view
+    on a different TIFF.  The MRC display flip is fixed by the UI and never
+    enters this module.
+"""
+
 import os
-import numpy as np
+import csv
 import math
-from skimage.transform import estimate_transform, warp, ProjectiveTransform
 from datetime import datetime
+
+import numpy as np
+from skimage.transform import estimate_transform, warp, ProjectiveTransform
 
 
 class CLEMCorrelator:
-    REQUIRED_POINT_PAIRS = {
-                        "euclidean": 2,
-                        "similarity": 2,
-                        "affine": 3,
-                        "projective": 4,
-                    }
 
-    def __init__(self, mrc_reader):
+    MIN_PAIRS = {"euclidean": 2, "similarity": 2, "affine": 3, "projective": 4}
+
+    def __init__(self, mrc_reader=None):
         self.mrc_reader = mrc_reader
-        self.last_tform = None
+        self.last_transform = None
 
-    # ---------------------------------------------------------------------------
-    # Helper function
-    # ---------------------------------------------------------------------------
-
-    def _resolve_flip(self, flip_value, flip_name):
-        if flip_value is not None:
-            return bool(flip_value)
-        if flip_name == "flip_y":
-            return True
-        if flip_name == "flip_x":
-            return bool(getattr(self.mrc_reader, "MONTAGE_FLIP_X", True))
-        return False
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _get_tiff_slice(tiff_stack, c, z, flip_x=False, flip_y=False):
-        img = tiff_stack[c, z]
+    def _apply(M, pts):
+        pts = np.asarray(pts, dtype=float).reshape(-1, 2)
+        hom = np.column_stack([pts, np.ones(len(pts), dtype=float)])
+        out = (M @ hom.T).T
+        return out[:, :2] / out[:, 2:3]
+
+    @staticmethod
+    def _matrix_of(tform):
+        return np.asarray(tform.params, dtype=float)
+
+    @staticmethod
+    def _image_center(shape):
+        h, w = shape[-2:]
+        return np.array([(w - 1) / 2.0, (h - 1) / 2.0], dtype=float)
+
+    @staticmethod
+    def _flip_slice(img, flip_x, flip_y):
+        """Flip a 2-D slice to reproduce the matched (display) view."""
         if flip_x:
             img = np.fliplr(img)
         if flip_y:
             img = np.flipud(img)
         return img
-    
-    # ---------------------------------------------------------------------------
-    # Functions which handel the transformation between the MRC and TIFF coordinate systems
-    # ---------------------------------------------------------------------------
 
-    @staticmethod
-    def _build_reflection_matrix(tiff_shape, flip_x=False, flip_y=False):
-        tiff_h, tiff_w = tiff_shape[-2:]
-        F = np.eye(3, dtype=float)
-
-        if flip_x:
-            Fx = np.array([
-                            [-1.0, 0.0, tiff_w - 1.0],
-                            [ 0.0, 1.0,            0.0],
-                            [ 0.0, 0.0,            1.0],
-                        ])
-            F = Fx @ F
-
-        if flip_y:
-            Fy = np.array([
-                            [1.0,  0.0,             0.0],
-                            [0.0, -1.0, tiff_h - 1.0],
-                            [0.0,  0.0,             1.0],
-                        ])
-            F = Fy @ F
-
-        return F
-    
-    def _apply_matrix(self, M, pts):
-        """Apply a 3x3 homogeneous matrix to an (N, 2) array of points."""
-        pts = np.asarray(pts, dtype=float)
-        hom = np.column_stack([pts, np.ones(len(pts), dtype=float)])
-        out = (M @ hom.T).T
-        return out[:, :2] / out[:, 2, None]
-
-    @staticmethod
-    def _image_center(tiff_shape):
-        if tiff_shape is None:
-            return None
-        h, w = tiff_shape[-2:]
-        return np.array([(w - 1) / 2.0, (h - 1) / 2.0], dtype=float)
-
-    def _rescale_matrix(self, M, new_scale, src_anchor, dst_anchor=None):
-        if new_scale <= 0:
-            raise ValueError("scale must be positive.")
+    def _diagnostics(self, M, src, dst):
         M = np.asarray(M, dtype=float)
-        A, t = M[:2, :2], M[:2, 2]
-        stored_scale = float(np.hypot(A[0, 0], A[1, 0]))
-        if stored_scale <= 0:
-            raise ValueError("Transform has no positive scale to replace.")
-        R = A / stored_scale
-        A_new = new_scale * R
-        src_anchor = np.asarray(src_anchor, dtype=float)
-        if dst_anchor is None:
-            dst_anchor = A @ src_anchor + t
-        out = np.eye(3, dtype=float)
-        out[:2, :2] = A_new
-        out[:2, 2] = np.asarray(dst_anchor, dtype=float) - A_new @ src_anchor
-        return out, stored_scale
-    
-    def fit_tiff_to_mrc(self, point_pairs, transform_type, predefined=None, predefined_transform=None,
-                        tiff_shape=None, fixed_scale=None, scale_tolerance=0.05, flip_x=None, flip_y=None,
-                        initial_transform=None):
-
-        predefined_transform = predefined_transform or predefined
-
-        complete = [(p["tiff"], p["mrc"]) for p in point_pairs if "tiff" in p and "mrc" in p]
-        required = 0 if predefined_transform is not None else self.REQUIRED_POINT_PAIRS.get(transform_type, 3)
-        if len(complete) < required:
-            raise ValueError(f"{transform_type.capitalize()} needs >= {required} pairs (you have {len(complete)}).")
-
-        src = np.asarray([p[0] for p in complete], dtype=float).reshape(-1, 2)
-        dst = np.asarray([p[1] for p in complete], dtype=float).reshape(-1, 2)
-
-        flip_x = self._resolve_flip(flip_x, "flip_x")
-        flip_y = self._resolve_flip(flip_y, "flip_y")
-        F = self._build_reflection_matrix(tiff_shape, flip_x=flip_x, flip_y=flip_y)
-        reflected = self._apply_matrix(F, src)          # fit everyone in the reflected frame
-
-        base, extra = self._estimate_base(transform_type, reflected, dst,fixed_scale=fixed_scale, scale_tolerance=scale_tolerance,
-            predefined_transform=predefined_transform, initial_transform=initial_transform, tiff_shape=tiff_shape,)
-
-        tform = ProjectiveTransform(matrix=base @ F)
-        fit_info = self._fit_diagnostics(tform, src, dst)
-        fit_info.update({"flip_x": bool(flip_x), "flip_y": bool(flip_y)})
-        fit_info.update(extra)
-        if "bounded_scale" in extra:                    # keep the informative summary line
-            fit_info["text"] += (
-                f"  expected={extra['expected_scale']:.4f}"
-                f"  allowed=[{extra['scale_min']:.4f}, {extra['scale_max']:.4f}]"
-                f"  free={extra['unconstrained_scale']:.4f}"
-                f"  used={extra['bounded_scale']:.4f}"
-            )
-
-        self.last_tform = tform
-        return tform, fit_info, len(complete)
-
-    def _estimate_base(self, transform_type, reflected, dst, fixed_scale=None, scale_tolerance=0.05,
-                       predefined_transform=None, initial_transform=None, tiff_shape=None):
-
-        if predefined_transform is not None:
-            base = np.asarray(predefined_transform.params, dtype=float)
-            if fixed_scale is None:
-                return base, {}
-            if len(reflected):
-                src_anchor, dst_anchor = reflected.mean(axis=0), dst.mean(axis=0)
-            else:
-                src_anchor = self._image_center(tiff_shape)
-                if src_anchor is None:
-                    src_anchor, dst_anchor = np.zeros(2), None   # fall back to origin
-                else:
-                    dst_anchor = None                            # keep centre's mapping
-            base, stored_scale = self._rescale_matrix(base, fixed_scale, src_anchor, dst_anchor)
-            extra = { 
-                        "expected_scale": float(fixed_scale),
-                        "stored_scale": stored_scale,
-                        "applied_scale": float(fixed_scale),
-                    }
-            return base, extra
-
-        if transform_type not in {"similarity", "euclidean"}:
-            base = np.asarray(estimate_transform(transform_type, reflected, dst).params, dtype=float)
-            return base, {}
-
-        free = np.asarray(estimate_transform("similarity", reflected, dst).params, dtype=float)
-        if fixed_scale is None:
-            return free, {}
-
-        return self._bound_similarity_scale(free, reflected, dst, fixed_scale, scale_tolerance, initial_transform)
-    
-    def _bound_similarity_scale(self, free_params, reflected, dst, fixed_scale,
-                                scale_tolerance, initial_transform=None):
-        """Clamp a free similarity fit's scale into
-        [fixed_scale*(1-tol), fixed_scale*(1+tol)], recomputing the translation
-        so the transform still maps the reflected-source centroid onto the dst
-        centroid."""
-        if fixed_scale <= 0:
-            raise ValueError("fixed_scale must be positive.")
-        if not 0 <= scale_tolerance < 1:
-            raise ValueError("scale_tolerance must be between 0 and 1.")
-
-        free_A = np.asarray(free_params[:2, :2], dtype=float)
-
-        if initial_transform is not None:
-            init_A = np.asarray(initial_transform.params, dtype=float)[:2, :2]
-            init_scale = float(np.hypot(init_A[0, 0], init_A[1, 0]))
-            if init_scale > 0:
-                free_A = init_A
-                unconstrained_scale = init_scale
-            else:
-                unconstrained_scale = float(np.hypot(free_A[0, 0], free_A[1, 0]))
-        else:
-            unconstrained_scale = float(np.hypot(free_A[0, 0], free_A[1, 0]))
-
-        if unconstrained_scale <= 0:
-            raise ValueError("Could not determine a positive similarity scale.")
-
-        scale_min = fixed_scale * (1.0 - scale_tolerance)
-        scale_max = fixed_scale * (1.0 + scale_tolerance)
-        fitted_scale = float(np.clip(unconstrained_scale, scale_min, scale_max))
-
-        R = free_A / unconstrained_scale
-        translation = dst.mean(axis=0) - fitted_scale * (R @ reflected.mean(axis=0))
-
-        base = np.eye(3, dtype=float)
-        base[:2, :2] = fitted_scale * R
-        base[:2, 2] = translation
-
-        extra = {
-            "expected_scale": float(fixed_scale),
-            "unconstrained_scale": unconstrained_scale,
-            "bounded_scale": fitted_scale,
-            "scale_min": scale_min,
-            "scale_max": scale_max,
-            "scale_tolerance": scale_tolerance,
-            "scale_was_clamped": not np.isclose(fitted_scale, unconstrained_scale),
-        }
-        return base, extra
-
-    def warp_channels_to_mrc(self, tiff_stack, tform, mrc_shape, flip_x=None, flip_y=None, status_cb=None,):
-
-        mrc_h, mrc_w = mrc_shape
-        C, Z = tiff_stack.shape[:2]
-        flip_x = self._resolve_flip(flip_x, "flip_x")
-        flip_y = self._resolve_flip(flip_y, "flip_y")
-
-        warped_channels = []
-
-        for c in range(C):
-            acc = None
-
-            for z in range(Z):
-                if status_cb is not None:
-                    status_cb(f"Warping channel {c + 1}/{C}, z {z + 1}/{Z}...")
-
-                img = self._get_tiff_slice(tiff_stack, c, z, flip_x, flip_y)
-
-                warped = warp(img, tform.inverse, output_shape=(mrc_h, mrc_w), order=1, preserve_range=True, mode="constant", cval=0,).astype(np.float32)
-
-                if acc is None:
-                    acc = warped
-                else:
-                    np.maximum(acc, warped, out=acc)
-
-            warped_channels.append(acc)
-
-        self.last_tform = tform
-        return warped_channels
-
-
-    def run_apply_transform(self, point_pairs, transform_type, tiff_stack, mrc_shape,
-                        flip_x=None, flip_y=None, warp_flip_x=None, warp_flip_y=None,
-                        status_cb=None, initial_transform=None, predefined=None,
-                        predefined_transform=None, fixed_scale=None, scale_tolerance=0.05,
-                        tiff_shape=None, auto_save=True, save_dir=None, save_format="auto"):
-
-        tform, fit_info, n_pairs = self.fit_tiff_to_mrc(
-            point_pairs, transform_type, predefined=predefined,
-            predefined_transform=predefined_transform,
-            tiff_shape=tiff_shape or tiff_stack.shape,
-            fixed_scale=fixed_scale, scale_tolerance=scale_tolerance,
-            flip_x=flip_x, flip_y=flip_y, initial_transform=initial_transform)
-
-        wfx = flip_x if warp_flip_x is None else warp_flip_x     # warp follows the DISPLAY
-        wfy = flip_y if warp_flip_y is None else warp_flip_y
-        warped_channels = self.warp_channels_to_mrc(
-            tiff_stack=tiff_stack, tform=tform, mrc_shape=mrc_shape,
-            flip_x=wfx, flip_y=wfy, status_cb=status_cb)
-
-        record = self._build_transform_record(
-            tform, transform_type, fit_info=fit_info, n_pairs=n_pairs,
-            flip_x=wfx, flip_y=wfy,                              # store the WARP (display) flip
-            mrc_shape=mrc_shape, tiff_shape=tiff_shape or tiff_stack.shape,
-            fixed_scale=fixed_scale, scale_tolerance=scale_tolerance)
-        
-
-        result = {
-                    "transform": tform,
-                    "fit_info": fit_info,
-                    "n_pairs": n_pairs,
-                    "warped_channels": warped_channels,
-                    "record": record,
-                }
-        if auto_save:
-            try:
-                result["saved_path"] = self.save_transform(record, save_dir=save_dir, fmt=save_format)
-            except Exception as exc:            # never let a save failure kill the warp
-                result["saved_path"] = None
-                result["save_error"] = str(exc)
-
-        return result
-    
-    
-    # ---------------------------------------------------------------------------
-    # Diagnostics functions
-    # ---------------------------------------------------------------------------
-
-    def _check_scale(self, fit_info, expected_scale, tolerance=0.05):
-        sx = fit_info["scale_x"]
-        sy = fit_info["scale_y"]
-
-        lo = expected_scale * (1.0 - tolerance)
-        hi = expected_scale * (1.0 + tolerance)
-
-        ok_x = lo <= sx <= hi
-        ok_y = lo <= sy <= hi
-
-        return {
-                    "expected_scale": expected_scale,
-                    "tolerance": tolerance,
-                    "scale_min": lo,
-                    "scale_max": hi,
-                    "ok": ok_x and ok_y,
-                    "ok_x": ok_x,
-                    "ok_y": ok_y,
-                    "message": (f"expected scale={expected_scale:.4f} allowed=[{lo:.4f}, {hi:.4f}] fit x={sx:.4f}, y={sy:.4f}"),
-                }
-    
-    def _fit_diagnostics(self, tform, src, dst):
-
-        M = np.asarray(tform.params, dtype=float)
-
         sx = math.hypot(M[0, 0], M[1, 0])
         sy = math.hypot(M[0, 1], M[1, 1])
         rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
-
-        src = np.asarray(src, dtype=float)
+        src = np.asarray(src, dtype=float).reshape(-1, 2)
         if len(src):
-            pred = tform(src)
-            rmse = float(np.sqrt(np.mean(np.sum((pred - np.asarray(dst, float)) ** 2, axis=1))))
-            rmse_txt = f"{rmse:.1f} px"
+            pred = self._apply(M, src)
+            rmse = float(np.sqrt(np.mean(np.sum(
+                (pred - np.asarray(dst, float).reshape(-1, 2)) ** 2, axis=1))))
+            rmse_txt = f"{rmse:.2f} px"
         else:
-            rmse = None                     # no landmarks to measure against
-            rmse_txt = "n/a (no pairs)"
+            rmse, rmse_txt = None, "n/a"
+        return {"scale_x": sx, "scale_y": sy, "rotation_deg": rot,
+                "rmse_px": rmse, "det": float(np.linalg.det(M[:2, :2])),
+                "text": f"scale x={sx:.4f}, y={sy:.4f}  rot={rot:.2f} deg  RMSE={rmse_txt}"}
 
-        return {
-                    "scale_x": sx,
-                    "scale_y": sy,
-                    "rotation_deg": rot,
-                    "rmse_px": rmse,
-                    "text": (f"scale x={sx:.4f}, y={sy:.4f}  rot={rot:.2f} deg   fit RMSE={rmse_txt}"),
-                }
-    
-    # ---------------------------------------------------------------------------
-    # TransformRecord: build / save / load / re-apply
-    # ---------------------------------------------------------------------------
+    def _rescale_about(self, M, new_scale, src_anchor, dst_anchor):
+        """Copy of M with linear scale set to new_scale (rotation preserved),
+        translated so src_anchor -> dst_anchor.  For concentric re-apply to a
+        different magnification."""
+        M = np.asarray(M, dtype=float)
+        A = M[:2, :2]
+        stored = float(np.hypot(A[0, 0], A[1, 0]))
+        if stored <= 0:
+            raise ValueError("transform has no positive scale to rescale")
+        A_new = (new_scale / stored) * A
+        out = np.eye(3, dtype=float)
+        out[:2, :2] = A_new
+        out[:2, 2] = np.asarray(dst_anchor, float) - A_new @ np.asarray(src_anchor, float)
+        return out, stored
+
+    # ------------------------------------------------------------------ #
+    # Fit  (plain -- no reflection)
+    # ------------------------------------------------------------------ #
+
+    def fit(self, point_pairs, transform_type):
+        """Fit a transform mapping DISPLAY-TIFF -> DISPLAY-MRC.
+
+        point_pairs : list of {"tiff": (x, y), "mrc": (x, y)} in display pixels.
+        Returns (ProjectiveTransform, fit_info dict, n_pairs).
+        """
+        pairs = [(p["tiff"], p["mrc"]) for p in point_pairs
+                 if "tiff" in p and "mrc" in p]
+        need = self.MIN_PAIRS.get(transform_type, 3)
+        if len(pairs) < need:
+            raise ValueError(
+                f"{transform_type.capitalize()} needs >= {need} pairs "
+                f"(you have {len(pairs)}).")
+        src = np.array([p[0] for p in pairs], dtype=float).reshape(-1, 2)
+        dst = np.array([p[1] for p in pairs], dtype=float).reshape(-1, 2)
+        base = estimate_transform(transform_type, src, dst)
+        M = self._matrix_of(base)
+        tform = ProjectiveTransform(matrix=M)
+        info = self._diagnostics(M, src, dst)
+        self.last_transform = tform
+        return tform, info, len(pairs)
+
+    # ------------------------------------------------------------------ #
+    # Warp  (flip the raw TIFF to the matched view, then warp)
+    # ------------------------------------------------------------------ #
+
+    def warp_channels(self, tiff_stack, tform, mrc_shape,
+                      flip_x=False, flip_y=True, status_cb=None):
+        """Warp every channel (max over Z) of the raw tiff_stack onto the MRC
+        grid.  The raw slice is first flipped by (flip_x, flip_y) to reproduce
+        the matched display view the transform was fit against.  Returns a list
+        of 2-D float32 arrays in the DISPLAY-MRC frame."""
+        mrc_h, mrc_w = mrc_shape
+        C, Z = tiff_stack.shape[:2]
+        out = []
+        for c in range(C):
+            acc = None
+            for z in range(Z):
+                if status_cb is not None:
+                    status_cb(f"Warping channel {c + 1}/{C}, z {z + 1}/{Z}...")
+                img = self._flip_slice(tiff_stack[c, z], flip_x, flip_y)
+                warped = warp(img, tform.inverse, output_shape=(mrc_h, mrc_w),
+                              order=1, preserve_range=True,
+                              mode="constant", cval=0).astype(np.float32)
+                acc = warped if acc is None else np.maximum(acc, warped)
+            out.append(acc)
+        return out
+
+    def warp_slice(self, tiff_stack, c, z, tform, mrc_shape,
+                   flip_x=False, flip_y=True):
+        """Warp one (channel, z) raw slice onto the MRC grid (DISPLAY-MRC frame),
+        applying the same TIFF display flip first."""
+        mrc_h, mrc_w = mrc_shape
+        img = self._flip_slice(tiff_stack[c, z], flip_x, flip_y)
+        return warp(img, tform.inverse, output_shape=(mrc_h, mrc_w),
+                    order=1, preserve_range=True, mode="constant",
+                    cval=0).astype(np.float32)
+
+    # ------------------------------------------------------------------ #
+    # High-level entry points
+    # ------------------------------------------------------------------ #
+
+    def run_fit_and_warp(self, point_pairs, transform_type, tiff_stack, mrc_shape,
+                         flip_x=False, flip_y=True, status_cb=None,
+                         mrc_pixel_spacing_um=None, tiff_pixel_spacing_um=None,
+                         auto_save=False, save_dir=None):
+        """Fresh fit from display-frame landmark pairs, then warp.  flip_x/flip_y
+        are the TIFF display orientation and are stored in the record."""
+        tform, info, n_pairs = self.fit(point_pairs, transform_type)
+        warped = self.warp_channels(tiff_stack, tform, mrc_shape,
+                                     flip_x=flip_x, flip_y=flip_y, status_cb=status_cb)
+        record = self._make_record(tform, transform_type, info, n_pairs,
+                                    mrc_shape, tiff_stack.shape, flip_x, flip_y,
+                                    mrc_pixel_spacing_um, tiff_pixel_spacing_um)
+        result = {"transform": tform, "fit_info": info, "n_pairs": n_pairs,
+                  "warped_channels": warped, "record": record}
+        if auto_save:
+            try:
+                result["saved_path"] = self.save_transform(record, save_dir=save_dir)
+            except Exception as exc:
+                result["saved_path"] = None
+                result["save_error"] = str(exc)
+        return result
+
+    def run_reapply(self, record, tiff_stack, mrc_shape,
+                    tiff_pixel_spacing_um=None, mrc_pixel_spacing_um=None,
+                    status_cb=None):
+        """Re-apply a stored transform to a (possibly different, concentric)
+        TIFF.  The TIFF is flipped by the record's stored flip_x/flip_y to
+        reproduce the matched view; if the pixel size differs the transform is
+        rescaled about the shared centre."""
+        if isinstance(record, str):
+            record = self.load_transform(record)
+        M = np.asarray(record.matrix, dtype=float)
+        tform = ProjectiveTransform(matrix=M)
+        note = "re-applied stored transform"
+
+        want_scale = None
+        if tiff_pixel_spacing_um and mrc_pixel_spacing_um:
+            want_scale = float(tiff_pixel_spacing_um) / float(mrc_pixel_spacing_um)
+        if want_scale is not None and record.tiff_shape is not None:
+            old_center = self._image_center(record.tiff_shape)
+            new_center = self._image_center(tiff_stack.shape)
+            dst_anchor = self._apply(M, old_center[None, :])[0]
+            M2, stored = self._rescale_about(M, want_scale, new_center, dst_anchor)
+            tform = ProjectiveTransform(matrix=M2)
+            note = f"re-applied, rescaled {stored:.4f} -> {want_scale:.4f}"
+            M = M2
+
+        fx = bool(record.flip_x)
+        fy = bool(record.flip_y)
+        info = self._diagnostics(M, np.empty((0, 2)), np.empty((0, 2)))
+        info["text"] = note
+        warped = self.warp_channels(tiff_stack, tform, mrc_shape,
+                                     flip_x=fx, flip_y=fy, status_cb=status_cb)
+        new_record = self._make_record(tform, record.transform_type, info,
+                                       record.n_pairs, mrc_shape, tiff_stack.shape,
+                                       fx, fy, mrc_pixel_spacing_um, tiff_pixel_spacing_um)
+        return {"transform": tform, "fit_info": info,
+                "n_pairs": record.n_pairs or 0,
+                "warped_channels": warped, "record": new_record}
+
+    def run_reapply_refine(self, record, point_pairs, transform_type, tiff_stack,
+                           mrc_shape, flip_x=False, flip_y=True,
+                           mrc_pixel_spacing_um=None, tiff_pixel_spacing_um=None,
+                           status_cb=None):
+        """Fine-tune: a fresh fit on a few landmarks placed on the new TIFF's
+        matched view (scale determined by the landmarks)."""
+        return self.run_fit_and_warp(
+            point_pairs, transform_type, tiff_stack, mrc_shape,
+            flip_x=flip_x, flip_y=flip_y, status_cb=status_cb,
+            mrc_pixel_spacing_um=mrc_pixel_spacing_um,
+            tiff_pixel_spacing_um=tiff_pixel_spacing_um)
+
+    # ------------------------------------------------------------------ #
+    # Record build / save / load
+    # ------------------------------------------------------------------ #
+
+    def _make_record(self, tform, transform_type, info, n_pairs,
+                     mrc_shape, tiff_shape, flip_x, flip_y,
+                     mrc_pixel_spacing_um, tiff_pixel_spacing_um):
+        from clem_dataclasses import TransformRecord
+        M = self._matrix_of(tform)
+        if mrc_pixel_spacing_um is None and self.mrc_reader is not None:
+            mrc_pixel_spacing_um = getattr(self.mrc_reader, "pixel_spacing_um", None)
+        return TransformRecord(
+            matrix=M.tolist(),
+            transform_type=transform_type,
+            flip_x=bool(flip_x), flip_y=bool(flip_y),     # TIFF display orientation
+            scale_x=info.get("scale_x"),
+            scale_y=info.get("scale_y"),
+            rotation_deg=info.get("rotation_deg"),
+            rmse_px=info.get("rmse_px"),
+            n_pairs=n_pairs,
+            mrc_shape=tuple(mrc_shape) if mrc_shape is not None else None,
+            tiff_shape=tuple(tiff_shape) if tiff_shape is not None else None,
+            pixel_spacing_um=mrc_pixel_spacing_um,
+            tiff_pixel_spacing_um=tiff_pixel_spacing_um,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
 
     @staticmethod
     def _yaml():
-        """Return the PyYAML module if importable, else None (so CSV is used)."""
         try:
             import yaml
             return yaml
         except Exception:
             return None
 
-    def _resolve_format(self, fmt):
-        fmt = (fmt or "auto").lower()
-        if fmt in ("yaml", "yml"):
-            return "yaml"
-        if fmt == "csv":
-            return "csv"
-        # "auto": YAML is the most suitable for a small matrix + labelled metadata
-        # record; fall back to CSV when PyYAML is unavailable.
-        return "yaml" if self._yaml() is not None else "csv"
-
-    def _build_transform_record(self, tform, transform_type, fit_info=None, n_pairs=None,
-                                flip_x=None, flip_y=None, mrc_shape=None, tiff_shape=None,
-                                fixed_scale=None, scale_tolerance=None, pixel_spacing_um=None,
-                                created_at=None):
-        from clem_dataclasses import TransformRecord
-
-        fit_info = fit_info or {}
-        M = np.asarray(tform.params, dtype=float)
-
-        if pixel_spacing_um is None and self.mrc_reader is not None:
-            pixel_spacing_um = getattr(self.mrc_reader, "pixel_spacing_um", None)
-
-        return TransformRecord(
-            matrix=M.tolist(),
-            transform_type=transform_type,
-            flip_x=self._resolve_flip(flip_x, "flip_x"),
-            flip_y=self._resolve_flip(flip_y, "flip_y"),
-            scale_x=fit_info.get("scale_x"),
-            scale_y=fit_info.get("scale_y"),
-            rotation_deg=fit_info.get("rotation_deg"),
-            rmse_px=fit_info.get("rmse_px"),
-            fixed_scale=fit_info.get("expected_scale", fixed_scale),
-            scale_tolerance=fit_info.get("scale_tolerance", scale_tolerance),
-            n_pairs=n_pairs,
-            mrc_shape=tuple(mrc_shape) if mrc_shape is not None else None,
-            tiff_shape=tuple(tiff_shape) if tiff_shape is not None else None,
-            pixel_spacing_um=pixel_spacing_um,
-            created_at=created_at or datetime.now().isoformat(timespec="seconds"),
-        )
-
     def _default_save_dir(self):
-        base = getattr(self.mrc_reader, "output_root", None) if self.mrc_reader is not None else None
+        base = getattr(self.mrc_reader, "output_root", None) if self.mrc_reader else None
         return os.path.join(base, "transforms") if base else "transforms"
 
-    def save_transform(self, record, save_dir=None, fmt="auto", filename=None):
-        """Write a TransformRecord to disk and return the path.
-
-        The file name always contains the transform type and the creation
-        date-time, e.g. ``transform_similarity_20260716-181123.yaml``.
-        """
+    def save_transform(self, record, save_dir=None, filename=None):
         if save_dir is None:
             save_dir = self._default_save_dir()
         os.makedirs(save_dir, exist_ok=True)
-
-        fmt = self._resolve_format(fmt)
-        ext = "yaml" if fmt == "yaml" else "csv"
-
+        yaml = self._yaml()
+        ext = "yaml" if yaml is not None else "csv"
         if filename is None:
-            stamp = record.created_at or datetime.now().isoformat(timespec="seconds")
-            # ISO 2026-07-16T18:11:23 -> 20260716-181123
+            stamp = (record.created_at or datetime.now().isoformat(timespec="seconds"))
             stamp = stamp.replace("-", "").replace(":", "").replace("T", "-")
-            ttype = (record.transform_type or "transform")
-            filename = f"transform_{ttype}_{stamp}.{ext}"
-
+            filename = f"transform_{record.transform_type or 'transform'}_{stamp}.{ext}"
         path = os.path.join(save_dir, filename)
-        # Never silently clobber a different transform saved in the same second.
-        if os.path.exists(path):
+        n = 1
+        while os.path.exists(path):
             stem, dot, tail = filename.rpartition(".")
-            n = 1
-            while os.path.exists(path):
-                path = os.path.join(save_dir, f"{stem}-{n}{dot}{tail}")
-                n += 1
-
-        if fmt == "yaml":
-            self._write_yaml(record, path)
+            path = os.path.join(save_dir, f"{stem}-{n}{dot}{tail}")
+            n += 1
+        if yaml is not None:
+            with open(path, "w") as fh:
+                fh.write("# CLEM TIFF->MRC transform (maps DISPLAY TIFF px -> DISPLAY MRC px)\n")
+                fh.write("# flip_x / flip_y are the TIFF display orientation used to match the MRC\n")
+                yaml.safe_dump(record.to_dict(), fh, sort_keys=False, default_flow_style=False)
         else:
             self._write_csv(record, path)
-
         record.source_path = path
         return path
-
-    def _write_yaml(self, record, path):
-        yaml = self._yaml()
-        if yaml is None:
-            raise RuntimeError("PyYAML is not available; call save_transform(..., fmt='csv').")
-        with open(path, "w") as fh:
-            fh.write("# CLEM TIFF->MRC transform (maps TIFF pixel coords -> MRC pixel coords)\n")
-            fh.write("# apply as: warp(img, ProjectiveTransform(matrix=matrix).inverse)\n")
-            yaml.safe_dump(record.to_dict(), fh, sort_keys=False, default_flow_style=False)
 
     def _write_csv(self, record, path):
         d = record.to_dict()
         matrix = d.pop("matrix")
         with open(path, "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["# CLEM TIFF->MRC transform; maps TIFF px -> MRC px"])
+            w.writerow(["# CLEM TIFF->MRC transform; DISPLAY TIFF px -> DISPLAY MRC px"])
             w.writerow(["key", "value"])
             for key, val in d.items():
                 if isinstance(val, (list, tuple)):
@@ -462,26 +321,21 @@ class CLEMCorrelator:
                         w.writerow([f"m{i}{j}", repr(float(val))])
 
     def load_transform(self, path):
-        """Load a transform from .yaml/.yml, .csv, or a legacy .txt export.
-        Returns a TransformRecord."""
+        from clem_dataclasses import TransformRecord
         ext = os.path.splitext(path)[1].lower()
         if ext in (".yaml", ".yml"):
-            record = self._read_yaml(path)
+            yaml = self._yaml()
+            if yaml is None:
+                raise RuntimeError("PyYAML not available to read a YAML transform.")
+            with open(path) as fh:
+                data = yaml.safe_load(fh)
+            rec = TransformRecord.from_dict(data)
         elif ext == ".csv":
-            record = self._read_csv(path)
+            rec = self._read_csv(path)
         else:
-            record = self._read_legacy_txt(path)
-        record.source_path = path
-        return record
-
-    def _read_yaml(self, path):
-        from clem_dataclasses import TransformRecord
-        yaml = self._yaml()
-        if yaml is None:
-            raise RuntimeError("PyYAML is not available to read a YAML transform.")
-        with open(path) as fh:
-            data = yaml.safe_load(fh)
-        return TransformRecord.from_dict(data)
+            rec = self._read_legacy_txt(path)
+        rec.source_path = path
+        return rec
 
     def _read_csv(self, path):
         from clem_dataclasses import TransformRecord
@@ -504,8 +358,6 @@ class CLEMCorrelator:
         return TransformRecord.from_dict(d)
 
     def _read_legacy_txt(self, path):
-        """Parse the old commented-TSV export (as written by export_transform /
-        the UI's Export Transform button)."""
         from clem_dataclasses import TransformRecord
         meta, rows = {}, []
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -526,139 +378,15 @@ class CLEMCorrelator:
                     continue
                 if len(nums) >= 3:
                     rows.append(nums[:3])
-        d = {
-            "matrix": rows[:3] if len(rows) >= 3 else None,
-            "transform_type": meta.get("transform_type"),
-            "flip_x": meta.get("flip_x"),
-            "flip_y": meta.get("flip_y"),
-            "pixel_spacing_um": meta.get("pixel_spacing_um"),
-            "n_pairs": meta.get("n_pairs"),
-            "mrc_shape": meta.get("mrc_shape_hw"),
-            "tiff_shape": meta.get("tiff_shape_czyx"),
-        }
+        d = {"matrix": rows[:3] if len(rows) >= 3 else None,
+             "transform_type": meta.get("transform_type"),
+             "flip_x": meta.get("flip_x"), "flip_y": meta.get("flip_y"),
+             "mrc_shape": meta.get("mrc_shape_hw"),
+             "tiff_shape": meta.get("tiff_shape_czyx"),
+             "pixel_spacing_um": meta.get("pixel_spacing_um")}
         return TransformRecord.from_dict(d)
 
     def transform_from_record(self, record):
-        """Reconstruct a skimage ProjectiveTransform from a TransformRecord."""
         if record.matrix is None:
-            raise ValueError("TransformRecord has no matrix to reconstruct.")
+            raise ValueError("TransformRecord has no matrix.")
         return ProjectiveTransform(matrix=np.asarray(record.matrix, dtype=float))
-
-    def load_transform_from_csv(self, path):
-        """Backward-compatible helper: return just the skimage transform
-        (used by the UI's Import Transform for .csv files)."""
-        return self.transform_from_record(self.load_transform(path))
-
-    def run_apply_loaded_transform(self, record, tiff_stack, mrc_shape, point_pairs=None,
-                               scale_limited=True, fixed_scale=None, scale_tolerance=None,
-                               flip_x=None, flip_y=None, status_cb=None,
-                               auto_save=False, save_dir=None, save_format="auto"):
-
-        if isinstance(record, str):
-            record = self.load_transform(record)
-        if flip_x is None: flip_x = record.flip_x        # use the frame the matrix was built in
-        if flip_y is None: flip_y = record.flip_y
-
-        if point_pairs is None:
-            tform = self.transform_from_record(record)
-            note = "re-applied stored transform (no re-fit)"
-            new_record = record
-            if fixed_scale is not None:
-                old_tform  = self.transform_from_record(record)
-                old_center = self._image_center(record.tiff_shape)
-                new_center = self._image_center(tiff_stack.shape)
-                if old_center is None: old_center = new_center
-                dst_anchor = old_tform(np.atleast_2d(old_center))[0]
-                matrix, stored = self._rescale_matrix(
-                    old_tform.params, fixed_scale,
-                    src_anchor=new_center, dst_anchor=dst_anchor)
-                tform = ProjectiveTransform(matrix=matrix)
-                note = f"re-applied concentric, rescaled {stored:.4f}->{float(fixed_scale):.4f}"
-                new_record = self._build_transform_record(
-                    tform, record.transform_type or "similarity",
-                    fit_info={"scale_x": fixed_scale, "scale_y": fixed_scale,
-                            "rotation_deg": record.rotation_deg},
-                    n_pairs=0, flip_x=flip_x, flip_y=flip_y,
-                    mrc_shape=mrc_shape, tiff_shape=tiff_stack.shape)
-            fit_info = {
-                "scale_x": (fixed_scale if fixed_scale is not None else record.scale_x),
-                "scale_y": (fixed_scale if fixed_scale is not None else record.scale_y),
-                "rotation_deg": record.rotation_deg, "rmse_px": record.rmse_px,
-                "text": note,
-            }
-            n_pairs = record.n_pairs or 0
-        else:
-            transform_type = record.transform_type or "similarity"
-            if scale_limited:
-                # Use the caller's scale if given, otherwise the stored one.
-                scale = fixed_scale if fixed_scale is not None else record.mean_scale
-                if scale is None:
-                    raise ValueError("No scale to limit to: pass fixed_scale=... "
-                                     "or use a record that carries a scale.")
-                tol = scale_tolerance if scale_tolerance is not None else (record.scale_tolerance or 0.05)
-                tform, fit_info, n_pairs = self.fit_tiff_to_mrc(
-                    point_pairs, transform_type, tiff_shape=tiff_stack.shape,
-                    fixed_scale=scale, scale_tolerance=tol,
-                    flip_x=flip_x, flip_y=flip_y)
-            else:
-                tform, fit_info, n_pairs = self.fit_tiff_to_mrc(
-                    point_pairs, transform_type, tiff_shape=tiff_stack.shape,
-                    flip_x=flip_x, flip_y=flip_y)
-            new_record = self._build_transform_record(
-                tform, transform_type, fit_info=fit_info, n_pairs=n_pairs,
-                flip_x=flip_x, flip_y=flip_y, mrc_shape=mrc_shape,
-                tiff_shape=tiff_stack.shape)
-
-        warped_channels = self.warp_channels_to_mrc(
-            tiff_stack=tiff_stack, tform=tform, mrc_shape=mrc_shape,
-            flip_x=flip_x, flip_y=flip_y, status_cb=status_cb)
-
-        result = {
-            "transform": tform,
-            "fit_info": fit_info,
-            "n_pairs": n_pairs,
-            "warped_channels": warped_channels,
-            "record": new_record,
-        }
-        if auto_save and point_pairs is not None:   # only save a freshly-fit transform
-            try:
-                result["saved_path"] = self.save_transform(new_record, save_dir=save_dir, fmt=save_format)
-            except Exception as exc:
-                result["saved_path"] = None
-                result["save_error"] = str(exc)
-        return result
-
-    # ---------------------------------------------------------------------------
-    # Import and export functions
-    # ---------------------------------------------------------------------------
-
-    def export_transform(self, path, tform, transform_type, flip_x=False, flip_y=False, mrc_shape=None, tiff_shape=None,
-    pixel_spacing_um=None, n_pairs=None,):
-        
-        M = np.asarray(tform.params, dtype=float)
-
-        with open(path, "w") as fh:
-            fh.write("# MRC Registration Tool - transform export\n")
-            fh.write("# maps TIFF (source) pixel coords -> MRC (destination) pixel coords\n")
-            fh.write("# apply as: warp(img, ProjectiveTransform(matrix=M).inverse)\n")
-            fh.write(f"# transform_type = {transform_type}\n")
-            fh.write(f"# flip_x = {bool(flip_x)}\n")
-            fh.write(f"# flip_y = {bool(flip_y)}\n")
-
-            if mrc_shape is not None:
-                h, w = mrc_shape
-                fh.write(f"# mrc_shape_hw = {h},{w}\n")
-
-            if tiff_shape is not None:
-                fh.write("# tiff_shape_czyx = ")
-                fh.write(",".join(str(s) for s in tiff_shape) + "\n")
-
-            if pixel_spacing_um is not None:
-                fh.write(f"# pixel_spacing_um = {pixel_spacing_um:.6f}\n")
-
-            if n_pairs is not None:
-                fh.write(f"# n_pairs = {n_pairs}\n")
-
-            fh.write("# matrix 3x3 row-major (homogeneous):\n")
-            for row in M:
-                fh.write("\t".join(f"{v:.10g}" for v in row) + "\n")
