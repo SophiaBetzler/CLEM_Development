@@ -13,7 +13,7 @@ from clem_dataclasses import AllSitesDataCollection, SiteDataSummary
 
 
 
-PATH = r"C:\Users\CZII\Documents\Data\s26jul15a"
+PATH = r"C:\Users\CZII\Documents\Data\s26jul01b"
 SAMPLE_TYPE = 'airyscan'
 OFFLINE = True
 if SAMPLE_TYPE == 'airyscan':

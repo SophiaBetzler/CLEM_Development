@@ -412,7 +412,7 @@ class StagePickerWindow(tk.Toplevel):
         self._crop_fov_var = tk.StringVar(value="2.0")
         ttk.Entry(cropfov_row, textvariable=self._crop_fov_var, width=6).pack(side="left", padx=(4, 0))
         src_row = ttk.Frame(btn); src_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        ttk.Label(src_row, text="Shift from", style="Sm.TLabel").pack(side="left")
+        ttk.Label(src_row, text="Coord mode", style="Sm.TLabel").pack(side="left")
         self._shift_source_var = tk.StringVar(value="stage")
         ttk.Radiobutton(src_row, text="stage", value="stage",
                         variable=self._shift_source_var).pack(side="left", padx=(4, 0))
@@ -591,9 +591,11 @@ class StagePickerWindow(tk.Toplevel):
         try:
             self._status.set("Grouping picks...")
             self.update_idletasks()
+            shift_source = self._shift_source_var.get()
+            self.clem_picker.set_output_coord_mode(shift_source, buffer='A')
             groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(
                 radius_um=radius_um, crop_fov=crop_fov,
-                output_folder=output_folder, shift_source=self._shift_source_var.get())
+                output_folder=output_folder, shift_source=shift_source)
             if not groups:
                 messagebox.showwarning("No groups", "Grouping produced no groups.", parent=self)
                 return
@@ -667,8 +669,7 @@ class StagePickerWindow(tk.Toplevel):
             crop_msg = ""
             if fov is not None and self._warp_slice_true is not None:
                 res = self.mrc_reader.write_fov_crops(
-                    self._mrc_true, self.clem_picker.get_all_picks(), self._warp_slice_true,
-                    len(self._chan_true), self._n_z, fov, root)
+                    site_data=self.site_data, warp_slice=self._warp_slice_true, n_channels=len(self._chan_true), n_z=self._n_z, fov_um=fov, output_root=root)
                 crop_msg = f"\n\n{len(res['tif'])} tif + {len(res['mrc'])} mrc crop(s) written."
             elif fov is not None:
                 crop_msg = "\n\nFOV crops skipped (channel data unavailable)."
@@ -972,7 +973,7 @@ class RegistrationApp(tk.Tk):
             self.bc_mrc.reset(); self.mrc_info_var.set(os.path.basename(path) + "  " + info)
             self.mrc_nav_frame.grid_remove()
             self._draw_mrc()
-            self.tem.load_montage_in_serialem(path)
+            self.tem.load_mrc_in_nav(path)
             self.status_var.set("MRC loaded.")
         except Exception as e:
             messagebox.showerror("MRC load error", str(e))
@@ -985,7 +986,7 @@ class RegistrationApp(tk.Tk):
         try:
             self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
             self._display_loaded_mrc_data(self.site_data.mrc)
-            self.tem.load_montage_in_serialem(self.site_data.mrc.mrc_path)
+            self.tem.load_mrc_in_nav(self.site_data.mrc.mrc_path)
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -1017,7 +1018,7 @@ class RegistrationApp(tk.Tk):
         self.site_data = self.mrc_reader.load_latest_from_site(self.site_id)
         self._display_loaded_site_data()
         if self.site_data.mrc is not None:
-            self.tem.load_montage_in_serialem(self.site_data.mrc.mrc_path)
+            self.tem.load_mrc_in_nav(self.site_data.mrc.mrc_path)
         # Startup auto re-apply if a stored transform exists for this site.
         record = None
         finder = getattr(self.mrc_reader, "_find_latest_transform", None)
@@ -1359,7 +1360,7 @@ class RegistrationApp(tk.Tk):
                 registration=self.site_data.registration, picks=self.site_data.picks)
             clem_picker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root,
                                                         mrc_reader=self.mrc_reader))
-            clem_picker.set_output_coord_mode("stage", buffer="A")
+
             names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)] for i in range(len(self.warped_channels))]
             n_z = self.site_data.tiff.num_z_slices if self.site_data.tiff is not None else 1
 

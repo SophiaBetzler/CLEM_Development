@@ -569,48 +569,50 @@ class MRCReader:
         cw = max(2, int(round(fov_um / spacing_um)))
         return cw
         
-    def write_mrc_crops(self, site_data, fov_um, center_px=None, label='crop' ,skip_pick_id=None):
+    def write_mrc_crops(self, mrc_summary, fov_um, center_px=None, picks=None,
+                    label='crop', skip_pick_id=None):
         
+
         def correct_image(crop):
             saturated = crop >= 1.0
             valid = crop[~saturated]
             mean = float(valid.mean()) if valid.size else 0.0
             crop[saturated] = mean
             return crop
-        
+    
         def _write_one(crop, out):
-            with mrcfile.new(out, overwrite=True) as mrc:
-                mrc.set_data(crop)
-                mrc.voxel_size = self.pixel_spacing_um * 10000
+            out = Path(out)
+            os.makedirs(out.parent, exist_ok=True)           # ensure .../picks exists
+            with mrcfile.new(str(out), overwrite=True) as mrc:
+                mrc.set_data(np.asarray(crop, dtype=np.float32))
+                mrc.voxel_size = mrc_summary.pixel_spacing_um * 10000   # um -> Angstrom
                 mrc.update_header_from_data()
-            return out
-
-        written_file_paths = []
-        if site_data.picks is not None and center_px is not None:
-            raise ValueError("Both picks and center_px cannot both be not None. One must be None.")
-        
-        elif site_data.picks is not None:
-            for pick in site_data.picks:
+            return str(out)
+    
+        if picks is not None and center_px is not None:
+            raise ValueError("picks and center_px cannot both be set; exactly one.")
+    
+        base = Path(mrc_summary.mrc_path).parent / "picks"   # folder next to the montage
+        written = []
+    
+        if picks is not None:
+            for pick in picks:
                 if skip_pick_id is not None and pick.pick_id == skip_pick_id:
                     continue
-                px = pick.pixel_x_um / self.pixel_spacing_um
-                py = pick.pixel_y_um / self.pixel_spacing_um
-                crop = self._crop_centered_at_pixel_coord(site_data.mrc.image, px, py, fov_um)
-                crop = correct_image(crop)
-                out = Path(site_data.path) / "picks" / f"{label}_{pick.pick_id}.mrc"
-                written_file_paths.append(_write_one(crop, out))
-                
+                px = pick.pixel_x_um / mrc_summary.pixel_spacing_um     # <-- mrc_summary, not self.
+                py = pick.pixel_y_um / mrc_summary.pixel_spacing_um
+                crop = correct_image(self._crop_centered_at_pixel_coord(mrc_summary.image, px, py, fov_um))
+                written.append(_write_one(crop, base / f"{label}_{pick.pick_id}.mrc"))
+    
         elif center_px is not None:
-            crop = self._crop_centered_at_pixel_coord(site_data.mrc.image, center_px[0], center_px[1], fov_um)
-            crop = correct_image(crop)
-            out = Path(site_data.path) / "picks" / f"{label}_center.mrc"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            written_file_paths = out
-        
+            crop = correct_image(self._crop_centered_at_pixel_coord(
+                mrc_summary.image, center_px[0], center_px[1], fov_um))
+            written.append(_write_one(crop, base / f"{label}_center.mrc"))   # <-- actually writes
+    
         else:
-            raise ValueError("Either picks or center_px most be defined.")
-
-        return written_file_paths
+            raise ValueError("Either picks or center_px must be defined.")
+    
+        return written
     
     def write_multichannel_crops(self, site_data, warp_slice, n_channels, n_z, fov_um, output_root, prefix=""):
         cw = self._fov_in_px(fov_um)

@@ -28,7 +28,7 @@ class ExecutiveControls:
             self.mrc.site_collection = self.site_collection
 
         self.montage_settings = {'lamella': {"stage_tilt": -self.milling_angle, "fov_um_x": 15.0, "fov_um_y": 30.0},
-                                    'airyscan': {"stage_tilt": 0.0, "fov_um_x": 105.0, "fov_um_y": 105.0}}
+                                    'airyscan': {"stage_tilt": 0.0, "fov_um_x": 105.0, "fov_um_y": 105.0, "fov_um_x_high_mag": 25.0, "fov_um_y_high_mag": 25.0},}
 
     # ---------------------------------------------------------------------------
     # Data loading (CSV file management)
@@ -51,6 +51,7 @@ class ExecutiveControls:
 
     def _import_csv_file(self, filename):
         csv_path = os.path.join(self.tem.output_root, filename)
+        print(f"[INFO] Importing csv file {csv_path}.")
 
         with open(csv_path, newline="") as f:
             rows = (line for line in f if not line.lstrip().startswith("#"))
@@ -111,14 +112,21 @@ class ExecutiveControls:
         self.tem.return_control_to_serialem(message="[ToDo] Run 'align to marker' alignment. ENTER.")
 
     def run_acquire_position_montages(self):
-        
+        from clem_dataclasses import SiteDataSummary
+        input('[ToDo] Use either clem_airyscan_tool or clem_arctis_tool to create tem_stage_positions.csv and copy it to the experiment folder. ENTER')
         sites = self._import_csv_file(filename='tem_stage_positions.csv')
         updated_sites = []
 
         for site_number, site in enumerate(sites):
             site_id = site.get("name") or f"site_{site_number+1:02d}"
+            site_dir = os.path.join(self.mrc.output_root, site_id)
+            os.makedirs(site_dir, exist_ok=True)
+             
+            
             print(f"[INFO] Acquiring montage for {site_id}.")
             self.tem.precise_stage_move(stage_x_um=site["stage_x_um"], stage_y_um=site["stage_y_um"], stage_z_um=site["stage_z_um"])
+            self.tem.acquire_image(mode='View', imaging_state='grid_square') 
+            input("Please move the center of the grid square / lamella to the center of the field of view. ENTER")
             self.tem.acquire_image(mode='View', imaging_state='grid_square') 
             input("Please move the center of the grid square / lamella to the center of the field of view. ENTER")
             #self.tem.set_eucentricity(level='rough_fine')
@@ -130,16 +138,38 @@ class ExecutiveControls:
             updated_site["stage_y_um"] = stage_y_um
             updated_site["stage_z_um"] = stage_z_um
             updated_site["stage_tilt"] = stage_tilt
-            updated_sites.append(updated_site)  
+            updated_sites.append(updated_site) 
+            self.tem.acquire_image(mode='View', imaging_state='grid_square', label=f"{updated_site['site_id']}_overview", save=True, create_map=True)
+            site_data = SiteDataSummary(site_id=site_id, path=site_dir)
+            self.register_site_data(site_data, active=True)
+        self._write_sites_csv(updated_sites, filename='tem_stage_positions_refined.csv')
+        self.tem.acquire_image(mode='View', imaging_state='grid_square') 
         self.tem.acquire_image(mode='Search')
         self.tem.return_control_to_serialem(message="Run 'align to marker' alignment. Press Continue to resume.")
-        
+        updated_sites = self._import_csv_file(filename='tem_stage_positions_refined.csv')
         for site_number, updated_site in enumerate(updated_sites):
             self.tem.precise_stage_move(stage_x_um = updated_site["stage_x_um"], stage_y_um = updated_site["stage_y_um"], stage_z_um = updated_site["stage_z_um"])
+            site_data = self.site_collection.get_site(updated_site['site_id'])
             nav_idx = self.tem.find_nav_item_with_note(f"{updated_site['site_id']}_overview")
-            self.tem.acquire_montage_at_nav_item(nav_idx=nav_idx, stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], site_id=f"{updated_site['name']}", eucentricity=False)
+            if self.sample_type == 'airyscan':
+                _, montage_path = self.tem.acquire_montage_at_nav_item(mode='Search', nav_idx=nav_idx, stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], site_id=updated_site['site_id'], eucentricity=False)
+                self.mrc.load_mrc_montage(montage_path) 
+                site_data.mrc = self.mrc.build_montage_summary(montage_path) 
+                center_px = self.tem.get_image_center(buffer='B')
+                mrc_path = self.mrc.write_mrc_crops(site_data.mrc, fov_um=10.0, picks=None, center_px=center_px, label='crop', skip_pick_id=None)
+                #self.tem.align_target_at_higher_mag(reference_image_path=mrc_path[0], mode='View') 
+                _, montage_high_mag_path = self.tem.acquire_montage_at_nav_item(mode='View', nav_idx=nav_idx, stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x_high_mag'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y_high_mag'], site_id=updated_site['site_id'], eucentricity=True)
+                self.mrc.load_mrc_montage(montage_high_mag_path) 
+                site_data.mrc_highmag = self.mrc.build_montage_summary(montage_high_mag_path)
+            elif self.sample_type == 'lamella':
+                _, montage_path = self.tem.acquire_montage_at_nav_item(mode='View', nav_idx=nav_idx, stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], site_id=updated_site['site_id'], eucentricity=True)
+                self.mrc.load_mrc_montage(montage_path) 
+                site_data.mrc = self.mrc.build_montage_summary(montage_path) 
             
-        self._write_sites_csv(updated_sites, filename='tem_stage_positions_refined.csv')
+            site_data.save()
+            
+        
+        
 
     def register_site_data(self, site_data, active=True):
         if self.site_collection is not None:
@@ -173,10 +203,10 @@ class ExecutiveControls:
         return self.site_summaries
 
     def run_high_magnification_clem_alignment_step(self, site_data):
-        H, W = self.site_data.mrc.image.shape
+        H, W = site_data.mrc.image.shape
         center_px = (W / 2.0, H / 2.0)
-        mrc_path = self.mrc.write_mrc_crops(self.site_data, fov_um=2.0, output_root=self.site_data.path, picks=None, center_px=center_px, prefix='crop_center_', skip_pick_id=None)
-        self.tem.align_target_at_higher_mag()
+        mrc_path = self.mrc.write_mrc_crops(site_data, fov_um=2.0, output_root=site_data.path, picks=None, center_px=center_px, prefix='crop_center_', skip_pick_id=None)
+        self.tem.align_target_at_higher_mag(reference_image_path=mrc_path) 
         self.tem.acquire_montage(mode='Search', fov_um_x=5.0, fov_um_y=5.0, stage_tilt=self.milling_angle, site_id=site_data.site_id, eucentricity=True)
         from clem_ui import RegistrationApp 
         ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data, tem_communication=self.tem)

@@ -64,7 +64,7 @@ class TEMComm:
             sem.SetItemImageShift(nav_idx, shift_x, shift_y)
         return nav_idx
 
-    def load_montage_in_serialem(self, mrc_file_name=None, site_id=None):
+    def load_mrc_in_nav(self, mrc_file_name=None, site_id=None, buffer=None):
 
         if mrc_file_name is None:
             mrc_file_name = self.mrc_reader.identify_montage_file(site_id=site_id)
@@ -75,22 +75,29 @@ class TEMComm:
             mrc_path = os.path.join(self.output_root, site_id, mrc_file_name)
         else:
             mrc_path = os.path.join(self.output_root, mrc_file_name)
-
+                
+        if mrc_path.lower().endswith(".mdoc"):
+            mrc_path = mrc_path[:-len(".mdoc")]
 
         idx =int(sem.NavIndexWithNote(Path(mrc_path).stem))
-
+        if buffer is None:
+            buffer = 'A'
         if idx > 0:
-            sem.LoadOtherMap(idx, "A")
+            sem.LoadOtherMap(idx, buffer)
         else:
             if sem.ReportIfNavOpen() == 0:
                 self._create_nav_file()
             
             while sem.ReportFileNumber() > 0:
                 sem.CloseFile()
-
-            sem.OpenOldFile(mrc_path)
-            sem.ReadFile(0)
-            sem.NewMap(0, Path(mrc_path).stem)
+            print("opening:", mrc_path, "exists:", os.path.isfile(mrc_path))
+            try:
+                sem.OpenOldFile(mrc_path)
+                sem.ReadFile(0)
+                sem.NewMap(0, Path(mrc_path).stem)
+                sem.Copy("A", buffer)
+            except Exception as e:
+                print(f"{e}")
             sem.CloseFile()
         
     def _save_buffer_image(self, site_id=None, acquisition_type=None, label=None):
@@ -180,8 +187,8 @@ class TEMComm:
             sem.S("A")
             note = f"{label}" if label is not None else (" ")
             nav_idx = int(sem.NewMap(0, note))
-        
-        return file_path
+        if save:
+            return file_path
 
     
     def find_nav_item_with_note(self, note):
@@ -312,6 +319,16 @@ class TEMComm:
         sem.GoToLowDoseArea(mode)
         return self.report_matrix("CameraToIS", 0)
     
+    def get_image_center(self, buffer):
+
+        img = np.asarray(sem.bufferImage(buffer))  
+        ny, nx = img.shape[:2]
+    
+        center_xy = (nx / 2, ny / 2)              # (X, Y) — the order sem commands expect
+        center_rc = (ny // 2, nx // 2)            # (row, col) — the order for numpy indexing
+        
+        return center_xy
+    
     def return_control_to_serialem(self, message):
         try:
             sem.Exit(0)
@@ -330,17 +347,17 @@ class TEMComm:
     def acquire_montage_at_nav_item(self, nav_idx, fov_um_x, fov_um_y, mode='Search', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
         sem.MoveToNavItem(nav_idx)
         sem.Delay(1, 'sec')
-        self.acquire_montage(mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, stage_tilt=stage_tilt, site_id=site_id, imaging_state=imaging_state, eucentricity=eucentricity)
-        
+        montage_id, filepath = self.acquire_montage(mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, stage_tilt=stage_tilt, site_id=site_id, imaging_state=imaging_state, eucentricity=eucentricity)
+        return montage_id, filepath
 
 
-    def acquire_montage(self, fov_um_x, fov_um_y, mode='View', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
+    def acquire_montage(self, fov_um_x, fov_um_y, mode='Search', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
         
-    
         self.prepare_imaging_state(mode=mode, imaging_state=imaging_state)
+        
         if eucentricity is True:
             self.set_eucentricity(level='rough_fine')
-        sem.SetImageShift(0.0, 0.0)
+        
 
         image_properties = self.get_image_properties(mode=mode, imaging_state=imaging_state)
 
@@ -366,6 +383,16 @@ class TEMComm:
             filepath = os.path.join(self.output_root, 'Montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
 
         self.precise_stage_move(stage_tilt=stage_tilt)
+        
+        if imaging_state is None:
+            if mode == 'View':
+                print('imaging mode is view')
+                sem.ParamSetToUseForMontage(2, 1)
+            elif mode == 'Search':
+                print('imaging mode is search')
+                sem.ParamSetToUseForMontage(3, 1)
+            else:
+                raise ValueError('Not a valid imaging mode for a montage.')
         sem.OpenNewMontage(nx, ny, filepath)
         sem.SetMontageParams(int(1),    # useStage = 1 (stage montage, required for hybrid usage of both image shift and stage shift)
                         overlap_pxl_x,    # overlap in x in pxl
@@ -374,14 +401,19 @@ class TEMComm:
                         int(image_properties["img_height_px"]),     # set to image size currently in buffer
                         0,              # skip correlation
                         int(image_properties["binning"]),
-                        -1.0)            # max image shift in micron, only relevant when first argument is 2, otherwise set to -1
+                        -1.0)  
+        
+                  # max image shift in micron, only relevant when first argument is 2, otherwise set to -1
 
         sem.Montage()
         
         if site_id is not None:
-            sem.NewMap(0, site_id + '_montage_' + timestamp)
+            montage_id = f"{site_id}_montage_{timestamp}"
+            
         else:
-            sem.NewMap(0, 'Montage' + '_' + timestamp)
+            montage_id = f"Montage_{timestamp}"
+        sem.NewMap(0, montage_id)
+        return montage_id, filepath
             
     # ---------------------------------------------------------------------------
     # Alignment routines
@@ -398,10 +430,10 @@ class TEMComm:
             debug = int(0)
 
         if mag_compensation is True:
-            self.sem.AlignBetweenMags(buffer, -1, -1, -1, 0, -1, int(0)) # buffer, center X in the reference, center Y in the reference, max allowed shift (negative means field of view, positive microns), scale (default: 4%), rotation (default: 3 degrees), avoid_image_shift
+            sem.AlignBetweenMags(buffer, -1, -1, -1, 0, -1, int(0)) # buffer, center X in the reference, center Y in the reference, max allowed shift (negative means field of view, positive microns), scale (default: 4%), rotation (default: 3 degrees), avoid_image_shift
             self._save_buffer_image(acquisition_type='mag_adjusted_image', label=label)
             buffer = "Q"
-            self.sem.Copy("B", buffer) 
+            sem.Copy("B", buffer) 
 
         max_iter = 5
         iteration = 0
@@ -442,10 +474,10 @@ class TEMComm:
         
         print(f"[INFO] Loading reference and aligning {label}...")
 
-        self.tem._load_mrc_in_nav(reference_image_path, buffer=buffer)
+        self.load_mrc_in_nav(reference_image_path, buffer=buffer)
         if target_stage_pos is not None:
-            self.tem.precise_stage_move(stage_x_um=target_stage_pos[0], stage_y_um=target_stage_pos[1], stage_z_um=target_stage_pos[2])
-        self.tem.acquire_image(mode=mode)
+            self.precise_stage_move(stage_x_um=target_stage_pos[0], stage_y_um=target_stage_pos[1], stage_z_um=target_stage_pos[2])
+        self.acquire_image(mode=mode)
 
         refined_stage_x, refined_stage_y, refined_stage_z = self.run_serialem_alignment_routine(buffer=buffer, label=label, mode=mode, mag_compensation=True)
 

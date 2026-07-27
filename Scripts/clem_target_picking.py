@@ -335,13 +335,13 @@ class CLEMPicker:
     # Target Refinement
     # ════════════════════════════════════════════════════════════════════════
 
-    def refine_target_stage_position(self, target_pick: Pick, site_id=None) -> Pick:
+    def refine_target_stage_position(self, target_pick: Pick) -> Pick:
         
         print(f"\n[INFO] Refining target {target_pick.pick_id}...")
   
         montage_crop_at_target_position = self.mrc_reader._crop_centered_at_pixel_coord(self.mrc_summary.image, target_pick.pixel_x_um, target_pick.pixel_y_um, fov_um=2.0)
 
-        target_crop_ref_path = os.path.join(site_id.path, f"{target_pick.pick_id}_target_reference.mrc")
+        target_crop_ref_path = os.path.join(self.site_data.path, f"{target_pick.pick_id}_target_reference.mrc")
 
         with mrcfile.new(target_crop_ref_path, overwrite=True) as mrc:
             mrc.set_data(montage_crop_at_target_position)
@@ -355,14 +355,14 @@ class CLEMPicker:
             target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
             reference_image_path=target_crop_ref_path, mode='Search')
         
-        target_pick.search_img_path = self.tem.acquire_image(mode='Search', save=True, site_id=site_id, label='tg_s')
+        target_pick.search_img_path = self.tem.acquire_image(mode='Search', save=True, site_id=self.site_id, label='tg_s')
         refined_x, refined_y, refined_z = alignment_result['refined_stage']
 
         alignment_result = self.tem.align_target_at_higher_mag(
             target_stage_pos=(target_pick.stage_x_um, target_pick.stage_y_um, target_pick.stage_z_um),
             reference_image_path=target_pick.search_img_path, mode='Record')
         
-        target_pick.search_img_path = self.tem.acquire_image(mode='Record', save=True, site_id=site_id, label='tg_r')
+        target_pick.search_img_path = self.tem.acquire_image(mode='Record', save=True, site_id=self.site_id, label='tg_r')
         refined_x, refined_y, refined_z = alignment_result['refined_stage']
 
 
@@ -517,7 +517,7 @@ class CLEMPicker:
     # Run paceTomo target/group generation for all picks/groups
     # ════════════════════════════════════════════════════════════════════════
     
-    def run_create_groups_for_pacetomo(self, site_id, radius_um=7.5, crop_fov=2.0, output_folder=None, shift_source='image'):
+    def run_create_groups_for_pacetomo(self, radius_um=7.5, crop_fov=2.0, output_folder=None, shift_source='image'):
 
         if output_folder is None:
             output_folder = self.site_output_root          # was self.site_output.root
@@ -529,11 +529,11 @@ class CLEMPicker:
         xg1_files = []
         for group in groups:
             if not self.tem.offline:                        # refine needs the scope
-                self.refine_target_stage_position(target_pick=group.tracking, site_id=site_id)
+                self.refine_target_stage_position(target_pick=group.tracking)
             self.calculate_image_shifts_for_group(group, source=shift_source)
-            ref_crops = self.mrc_reader.write_mrc_crops(mrc_image=self.mrc_summary.image, picks=group.picks,
-                fov_um=crop_fov, output_root=os.path.join(output_folder, f"group{group.group_id}"),  
-                skip_pick_id=group.tracking.pick_id, )
+            ref_crops = self.mrc_reader.write_mrc_crops(mrc_summary=self.mrc_summary, picks=group.picks,
+                fov_um=crop_fov, skip_pick_id=group.tracking.pick_id, )
+            
             nav_indices = self.add_group_to_navigator(group)
             xg1_files.append(self.generate_xg1_file(group, output_folder))
 
