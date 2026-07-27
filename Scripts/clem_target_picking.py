@@ -531,8 +531,7 @@ class CLEMPicker:
             if not self.tem.offline:                        # refine needs the scope
                 self.refine_target_stage_position(target_pick=group.tracking)
             self.calculate_image_shifts_for_group(group, source=shift_source)
-            ref_crops = self.mrc_reader.write_mrc_crops(mrc_summary=self.mrc_summary, picks=group.picks,
-                fov_um=crop_fov, skip_pick_id=group.tracking.pick_id, )
+            ref_crops = self.mrc_reader.write_mrc_crops(site_data=self.site_data, fov_um=crop_fov, skip_pick_id=group.tracking.pick_id, )
             
             nav_indices = self.add_group_to_navigator(group)
             xg1_files.append(self.generate_xg1_file(group, output_folder))

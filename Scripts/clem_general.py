@@ -156,7 +156,7 @@ class ExecutiveControls:
                 self.mrc.load_mrc_montage(montage_path) 
                 site_data.mrc = self.mrc.build_montage_summary(montage_path) 
                 center_px = self.tem.get_image_center(buffer='B')
-                mrc_path = self.mrc.write_mrc_crops(site_data.mrc, fov_um=10.0, picks=None, center_px=center_px, label='crop', skip_pick_id=None)
+                mrc_path = self.mrc.write_mrc_crops(site_data, fov_um=10.0, label='crop', skip_pick_id=None)
                 #self.tem.align_target_at_higher_mag(reference_image_path=mrc_path[0], mode='View') 
                 _, montage_high_mag_path = self.tem.acquire_montage_at_nav_item(mode='View', nav_idx=nav_idx, stage_tilt=self.milling_angle, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x_high_mag'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y_high_mag'], site_id=updated_site['site_id'], eucentricity=True)
                 self.mrc.load_mrc_montage(montage_high_mag_path) 
@@ -205,7 +205,7 @@ class ExecutiveControls:
     def run_high_magnification_clem_alignment_step(self, site_data):
         H, W = site_data.mrc.image.shape
         center_px = (W / 2.0, H / 2.0)
-        mrc_path = self.mrc.write_mrc_crops(site_data, fov_um=2.0, output_root=site_data.path, picks=None, center_px=center_px, prefix='crop_center_', skip_pick_id=None)
+        mrc_path = self.mrc.write_mrc_crops(site_data, fov_um=2.0, output_root=site_data.path, label='crop_center_', skip_pick_id=None)
         self.tem.align_target_at_higher_mag(reference_image_path=mrc_path) 
         self.tem.acquire_montage(mode='Search', fov_um_x=5.0, fov_um_y=5.0, stage_tilt=self.milling_angle, site_id=site_data.site_id, eucentricity=True)
         from clem_ui import RegistrationApp 

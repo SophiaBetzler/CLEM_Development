@@ -569,82 +569,78 @@ class MRCReader:
         cw = max(2, int(round(fov_um / spacing_um)))
         return cw
         
-    def write_mrc_crops(self, mrc_summary, fov_um, center_px=None, picks=None,
+    def write_mrc_crops(self, site_data, fov_um, output_root=None,
                     label='crop', skip_pick_id=None):
-        
+     
 
         def correct_image(crop):
-            saturated = crop >= 1.0
-            valid = crop[~saturated]
-            mean = float(valid.mean()) if valid.size else 0.0
-            crop[saturated] = mean
+            sat = crop >= 1.0
+            valid = crop[~sat]
+            crop[sat] = float(valid.mean()) if valid.size else 0.0
             return crop
-    
-        def _write_one(crop, out):
-            out = Path(out)
-            os.makedirs(out.parent, exist_ok=True)           # ensure .../picks exists
-            with mrcfile.new(str(out), overwrite=True) as mrc:
-                mrc.set_data(np.asarray(crop, dtype=np.float32))
-                mrc.voxel_size = mrc_summary.pixel_spacing_um * 10000   # um -> Angstrom
-                mrc.update_header_from_data()
-            return str(out)
-    
-        if picks is not None and center_px is not None:
-            raise ValueError("picks and center_px cannot both be set; exactly one.")
-    
-        base = Path(mrc_summary.mrc_path).parent / "picks"   # folder next to the montage
+
+        if output_root is None:
+            output_root = os.path.join(site_data.path, "picks", "crop")
+        os.makedirs(os.path.dirname(output_root) or ".", exist_ok=True)
+
         written = []
-    
-        if picks is not None:
-            for pick in picks:
-                if skip_pick_id is not None and pick.pick_id == skip_pick_id:
-                    continue
-                px = pick.pixel_x_um / mrc_summary.pixel_spacing_um     # <-- mrc_summary, not self.
-                py = pick.pixel_y_um / mrc_summary.pixel_spacing_um
-                crop = correct_image(self._crop_centered_at_pixel_coord(mrc_summary.image, px, py, fov_um))
-                written.append(_write_one(crop, base / f"{label}_{pick.pick_id}.mrc"))
-    
-        elif center_px is not None:
-            crop = correct_image(self._crop_centered_at_pixel_coord(
-                mrc_summary.image, center_px[0], center_px[1], fov_um))
-            written.append(_write_one(crop, base / f"{label}_center.mrc"))   # <-- actually writes
-    
-        else:
-            raise ValueError("Either picks or center_px must be defined.")
-    
+        for pick in site_data.picks:
+            if skip_pick_id is not None and pick.pick_id == skip_pick_id:
+                written.append(None)
+                continue
+            crop = self._crop_centered_at_pixel_coord(
+                site_data.mrc.image, pick.pixel_x_um, pick.pixel_y_um, fov_um)
+            crop = correct_image(crop)
+            out = f"{output_root}_{label}_{pick.pick_id}.mrc"
+            with mrcfile.new(out, overwrite=True) as mrc:
+                mrc.set_data(crop.astype(np.float32))
+                mrc.voxel_size = self.pixel_spacing_um * 10000
+                mrc.update_header_from_data()
+            written.append(out)
         return written
-    
-    def write_multichannel_crops(self, site_data, warp_slice, n_channels, n_z, fov_um, output_root, prefix=""):
+
+
+    def write_multichannel_crops(self, site_data, warp_slice, n_channels, n_z,
+                                fov_um, output_root, prefix=""):
         cw = self._fov_in_px(fov_um)
-        stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), dtype=np.float32) for _ in site_data.picks]
-        for pi, pick in enumerate(site_data.picks):
-            crop = self._crop_centered_at_pixel_coord(site_data.mrc.image, pick.pixel_x_um, pick.pixel_y_um, fov_um)
+        picks = site_data.picks
+        stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), dtype=np.float32) for _ in picks]
+
+        for pi, pick in enumerate(picks):                       # channel 0 = TEM
+            crop = self._crop_centered_at_pixel_coord(
+                site_data.mrc.image, pick.pixel_x_um, pick.pixel_y_um, fov_um)
             for z in range(n_z):
                 stacks[pi][z, 0] = crop
-        for c in range(n_channels):
+
+        for c in range(n_channels):                             # channels 1..N = warped FL
             for z in range(n_z):
                 full = warp_slice(c, z)
-                for pi, pick in enumerate(site_data.picks):
-                    px = pick.pixel_x_um / self.pixel_spacing_um
-                    py = pick.pixel_y_um / self.pixel_spacing_um
-                    stacks[pi][z, c+1] = self._crop_centered_at_pixel_coord(full, py, fov_um)
+                for pi, pick in enumerate(picks):
+                    stacks[pi][z, c + 1] = self._crop_centered_at_pixel_coord(
+                        full, pick.pixel_x_um, pick.pixel_y_um, fov_um)
+
         res = (1.0 / self.pixel_spacing_um) if self.pixel_spacing_um > 0 else 1.0
-        labels = (["TEM"]+[f"Ch{c}" for c in range(n_channels)]) * n_z
+        labels = (["TEM"] + [f"Ch{c}" for c in range(n_channels)]) * n_z
+        os.makedirs(os.path.dirname(output_root) or ".", exist_ok=True)
+
         written = []
-        for pi, pick in enumerate(site_data.picks):
+        for pi, pick in enumerate(picks):
             out = f"{output_root}{prefix}_{pick.pick_id}.tif"
-            tifffile.imwrite(out, stacks[pi], imagej=True, resolution=(res, res), metadata={"axes": "ZCYX" ,"unit": "um", "Labels": labels})
+            tifffile.imwrite(out, stacks[pi], imagej=True, resolution=(res, res),
+                            metadata={"axes": "ZCYX", "unit": "um", "Labels": labels})
             written.append(os.path.basename(out))
         return written
 
-    def write_fov_crops(self, site_data, warp_slice, n_channels, n_z, fov_um, output_root):
-        tif = self.write_multichannel_crops(site_data, warp_slice, n_channels, n_z, fov_um, output_root)
-        mrc_file_paths = self.write_mrc_crops(site_data, fov_um, output_root)
-        for i, pick in enumerate(site_data.picks):
-            pick.view_crop_path = mrc_file_paths[i]
-        
-        return {"tif": tif, "mrc": mrc_file_paths}
 
+    def write_fov_crops(self, site_data, warp_slice, n_channels, n_z,
+                        fov_um, output_root):
+        tif = self.write_multichannel_crops(
+            site_data, warp_slice, n_channels, n_z, fov_um, output_root)
+        mrc_paths = self.write_mrc_crops(site_data, fov_um, output_root)
+        for i, pick in enumerate(site_data.picks):
+            if i < len(mrc_paths) and mrc_paths[i] is not None:
+                pick.view_crop_path = mrc_paths[i]
+        return {"tif": tif, "mrc": mrc_paths}
     # ------------------------------------------------------------------ #
     # Montage assembly
     # ------------------------------------------------------------------ #
