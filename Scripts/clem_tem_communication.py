@@ -16,10 +16,9 @@ class TEMComm:
 
     
 
-    def __init__(self, path, mrc_reader, rotation=True, offline=False):
+    def __init__(self, path, mrc_reader, offline=False):
         self.output_root = path
         self.mrc_reader = mrc_reader
-        self.rotation = rotation
         self.offline = offline
         self.ACQUIRE = {
                         "View":    sem.View,
@@ -33,10 +32,10 @@ class TEMComm:
    
 
     # ---------------------------------------------------------------------------
-    # control image acquisition and navigator handling
+    # navigator handling and data storage
     # ---------------------------------------------------------------------------
 
-    def _create_nav_file(self):
+    def create_nav_file(self):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
 
         if sem.ReportIfNavOpen() > 0:
@@ -46,102 +45,100 @@ class TEMComm:
         sem.OpenNavigator(nav_file)
 
 
-    def add_nav_point(self, pick, label, output_coord_mode, image_height=None):
-        stage_x, stage_y, stage_z = pick.get_stage_position()
-        group_id = int(sem.GetUniqueNavID())
-        if output_coord_mode == "image":
-            z = stage_z if stage_z is not None else -999
-            if image_height is None:
-                raise ValueError("image_height is required for image-coordinate nav points")
-            pixel_y = image_height - 1 - pick.pixel_y_um          # flip Y to SerialEM's convention
-            nav_idx = int(sem.AddImagePosAsNavPoint("A", pick.pixel_x_um, pixel_y, z, group_id, 1))
+    def add_nav_point(self, mrc_dataclass, buffer="S"):
+        self.set_montage_to_buffer(note=mrc_dataclass.montage_id, buffer=buffer)
+        if len(mrc_dataclass.groups) == 0 and len(mrc_dataclass.picks) != 0:
+            for pick in mrc_dataclass.picks[:-1]:
+                idx = []
+                idx = sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, mrc_dataclass.stage_z_um, 0, 1)
+                sem.ChangeItemNote(idx, pick.pick_id)
+            idx = sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, mrc_dataclass.stage_z_um, 0, 0)
+            sem.ChangeItemNote(idx, mrc_dataclass.picks[-1].pick_id)
+        elif len(mrc_dataclass.groups) != 0:
+            for group in mrc_dataclass.groups:
+                for pick in mrc_dataclass.picks[:-1]:
+                    idx = []
+                    idx = sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, group.group_id, 1)
+                    sem.ChangeItemNote(idx, pick.pick_id)
+                idx = sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, mrc_dataclass.stage_z_um, group.group_id, 0)
+                sem.ChangeItemNote(idx, mrc_dataclass.picks[-1].pick_id)
+        elif len(mrc_dataclass.groups) == 0 and len(mrc_dataclass.picks) == 0:
+            raise ValueError(f"No picks exists for this montage {mrc_dataclass.montage_id}.")
         else:
-            z = stage_z if stage_z is not None else -999
-            nav_idx = int(sem.AddStagePosAsNavPoint(stage_x, stage_y, z, group_id, 1))
-        sem.ChangeItemLabel(nav_idx, label)
-        shift_x, shift_y = pick.get_image_shift()
-        if shift_x or shift_y:
-            sem.SetItemImageShift(nav_idx, shift_x, shift_y)
-        return nav_idx
+            return
 
-    def load_mrc_in_nav(self, mrc_file_name=None, site_id=None, buffer=None):
+    def load_mrc_in_nav(self, site_data=None, mrc_dataclass=None, buffer=None):
 
-        if mrc_file_name is None:
-            mrc_file_name = self.mrc_reader.identify_montage_file(site_id=site_id)
-        
-        if os.path.isabs(mrc_file_name):
-            mrc_path = mrc_file_name
-        elif site_id is not None:
-            mrc_path = os.path.join(self.output_root, site_id, mrc_file_name)
-        else:
-            mrc_path = os.path.join(self.output_root, mrc_file_name)
+        if mrc_dataclass is None:
+            mrc_dataclass = self.mrc_reader.identify_latest_montage_file(site_data)
                 
-        if mrc_path.lower().endswith(".mdoc"):
+        if mrc_dataclass.mrc_path.lower().endswith(".mdoc"):
             mrc_path = mrc_path[:-len(".mdoc")]
+        else: 
+            mrc_path = mrc_dataclass.mrc_path.lower()
 
-        idx =int(sem.NavIndexWithNote(Path(mrc_path).stem))
-        if buffer is None:
-            buffer = 'A'
+        if sem.ReportIfNavOpen() == 0: self._create_nav_file()
+
+        idx =int(sem.NavIndexWithNote(mrc_dataclass.montage_id))
+
+        if buffer is None: buffer = 'A'
         if idx > 0:
             sem.LoadOtherMap(idx, buffer)
         else:
-            if sem.ReportIfNavOpen() == 0:
-                self._create_nav_file()
-            
             while sem.ReportFileNumber() > 0:
                 sem.CloseFile()
-            print("opening:", mrc_path, "exists:", os.path.isfile(mrc_path))
             try:
                 sem.OpenOldFile(mrc_path)
                 sem.ReadFile(0)
-                sem.NewMap(0, Path(mrc_path).stem)
-                sem.Copy("A", buffer)
+                sem.NewMap(0, mrc_dataclass.montage_id)
+                if buffer != "A": sem.Copy("A", buffer)
             except Exception as e:
                 print(f"{e}")
-            sem.CloseFile()
         
-    def _save_buffer_image(self, site_id=None, acquisition_type=None, label=None):
+    def save_buffer_image(self, site_data, label=None):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()
-        filename_parts = [site_id, acquisition_type, label, f"mag_{mag}", timestamp, '.mrc']
+        filename_parts = [site_data.site_id, label, f"mag_{mag}", timestamp, '.mrc']
         filename = "_".join(str(part).strip("_") for part in filename_parts if part is not None and str(part) != "")
-
-        if site_id is not None:
-            output_dir = os.path.join(self.output_root, site_id)
-            os.makedirs(output_dir, exist_ok=True)
-        else:
-            output_dir = self.output_root
-
-        file_path = os.path.join(output_dir, filename)
+        os.makedirs(site_data.path, exist_ok=True)
+        file_path = os.path.join(site_data.path, filename)
         sem.OpenNewFile(file_path)
         sem.Save()                 
         sem.CloseFile()
-        return file_path 
+        return filename, timestamp
+
+    def find_nav_item_with_note(self, note):
+        idx = int(sem.NavIndexWithNote(note))
+        return idx if idx > 0 else None
+    
+    def set_montage_to_buffer(self, note, buffer='S'):
+        try:
+            map_idx = int(sem.NavIndexWithNote(note))
+        except Exception:
+            raise RuntimeError(f"Could not find nav item with note {note}. Please ensure the montage is loaded in the navigator.")
+        if map_idx > 0:
+            sem.LoadOtherMap(map_idx, buffer)
+        
+    # ---------------------------------------------------------------------------
+    # export image properties
+    # ---------------------------------------------------------------------------
 
     def get_image_properties(self, mode, imaging_state=None):
+
         self.prepare_imaging_state(mode=mode,imaging_state=imaging_state)
         self.ACQUIRE[mode]()
+        sem.Delay(1, 'sec')
         image_x_pxl, image_y_pxl, binning, exposure, pxl_size_nm, param_set = sem.ImageProperties("A")
-        magnification, *_ = sem.ReportMag()
+        magnification= int(sem.ReportMag()[0])
         return {
                 'img_width_px': int(image_x_pxl),
                 'img_height_px': int(image_y_pxl),
-                'pixel_size_um': pxl_size_nm/1000,
+                'pixel_spacing_um': pxl_size_nm/1000,
                 'magnification': magnification,
                 'binning': int(binning),
                 'exposure': exposure,
                 'param_set': param_set,
                 }
-    
-    def get_low_dose_mode_properties(self, mode):
-        if self.offline:
-            return{'mode': mode, 'magnification': 2000, 'pixel_size_um': 0.007}
-        
-        sem.GoToLowDoseArea(mode)
-        sem.Delay(1, 'sec')
-        magnification = int(sem.ReportMag()[0])
-        return magnification
-
 
     # ---------------------------------------------------------------------------
     # pause serialEM execution
@@ -156,47 +153,55 @@ class TEMComm:
         win.protocol("WM_DELETE_WINDOW", win.quit)
         win.mainloop()
         win.destroy()
-        
 
+        
+    def return_control_to_serialem(self, message):
+        try:
+            sem.Exit(0)
+        except Exception:
+            pass
+        self.wait_for_continue_trigger(message)
+        print("[INFO] Re-connecting to serialEM.")
+        sem.ConnectToSEM()
+        
     # ---------------------------------------------------------------------------
     # fundamental microscope controls
     # ---------------------------------------------------------------------------
 
-    def acquire_image(self, mode, imaging_state=None, save=False, site_id=None, label=None, create_map=False):
-        
-        if imaging_state is not None:
-            self.prepare_imaging_state(imaging_state=imaging_state)
-        else:
-            self.prepare_imaging_state(mode=mode)
+    def acquire_image(self, mode, imaging_state=None, save=False, site_data=None, label=None, buffer=None):
 
+        if self.offline:
+            print(f"[INFO] Image acquisition triggered with {imaging_state}, {mode}.")
+            return
+        
+        self.prepare_imaging_state(imaging_state=imaging_state, mode=mode)
         self.ACQUIRE[mode]()
-        
-        if create_map:
-            save=True
-        
+
+
+        image_properties = self.get_image_properties(mode=mode, imaging_state=imaging_state)
+
         if save:
-            file_path = self._save_buffer_image(site_id=site_id, acquisition_type="image", label=label)
-            
-        if create_map:
+            filename, timestamp = self.save_buffer_image(site_data, label=label)
             if sem.ReportIfNavOpen() == 0:
                 self._create_nav_file()
-            filename_parts = [site_id, label,'.mrc']
-            filename = "_".join(str(part).strip("_") for part in filename_parts if part is not None and str(part) != "")
+            nav_idx = int(sem.NewMap(0, filename))
+                          
+            image_parameters = {'image_path': os.path.join(site_data.path,  filename),
+                                'image_id' : filename,
+                                'image_height' : image_properties["image_height_px"],
+                                'image_width' : image_properties["image_width_px"],
+                                'pixel_spacing_um' : image_properties["pixel_spacing_um"],
+                                'magnification' : image_properties["magnificiation"],
+                                'stage_to_camera_matrix' : self.report_stage_to_camera_matrix(),
+                                'is_to_camera_matrix' : self.report_image_shift_to_camera_matrix(),
+                                'timestamp' : timestamp,
+                                }
+            site_data.add_image(label=label, image_parameters=image_parameters)
 
-            sem.OpenNewFile(os.path.join(self.output_root, filename))
-            sem.S("A")
-            note = f"{label}" if label is not None else (" ")
-            nav_idx = int(sem.NewMap(0, note))
-        if save:
-            return file_path
-
-    
-    def find_nav_item_with_note(self, note):
-        idx = int(sem.NavIndexWithNote(note))
-        return idx if idx > 0 else None
-    
-
-    def _reset_defocus(self):
+    def reset_defocus(self):
+        if self.offline:
+            print("[INFO] Running reset defocus.")
+            return
         if sem.ReportLowDose()[0] == 0:
             sem.SetEucentricFocus()
             sem.Delay(2, 'sec')
@@ -205,16 +210,13 @@ class TEMComm:
         else:
             print("[INFO] Defocus reset and eucentric focus skipped because the microscope is in LM mode.")
 
-    def apply_specimen_shift(self, mode, specimen_shift):
-        sem.prepare_imaging_state(mode=mode)
-        sem.Delay(1, 'sec')
-        sem.ImageShiftByMicrons(specimen_shift[0], specimen_shift[1])
- 
     def set_eucentricity(self, level):
+        if self.offline:
+            print("[INFO] Eucentricity routine.")
+            return
         self._reset_defocus()
         eucentricity_settings = {'fine': 2, 'rough': 1, 'rough_fine': 3}
-        if self.offline is False:
-            sem.Eucentricity(eucentricity_settings[level])
+        sem.Eucentricity(eucentricity_settings[level])
 
     def report_stage_position(self):
         stage_x, stage_y, stage_z = sem.ReportStageXYZ()
@@ -234,35 +236,41 @@ class TEMComm:
 
     def set_low_dose_imaging_state(self):
         low_dose_mode_state = sem.ReportLowDose()[0]
-
-        if not low_dose_mode_state:
+        if low_dose_mode_state:
+            return
+        else: 
             sem.SetLowDoseMode(1)
             sem.Delay(1, 'sec')
             if self.offline is False:
                 sem.NormalizeLenses(7)
-            print("[INFO] Switchted to Low Dose Mode.")
-        else:
-            print("[INFO] Already in Low Dose Mode.")
-
+            
     def set_non_low_dose_imaging_state(self, imaging_state):
-        sem.SetLowDoseMode(0)
-        sem.Delay(1, 'sec')
+        low_dose_mode_state = sem.ReportLowDose()[0]
+        if low_dose_mode_state: 
+            sem.SetLowDoseMode(0)
+            sem.Delay(1, 'sec')
+        
         defocus = {'grid_square': -10.0, 'LMM': -50.0}
+        if self.offline is False:
+            sem.ResetImageShift()
         
         if imaging_state in ['LMM', 'grid_square']:
             sem.GoToImagingState(imaging_state)
-            sem.Delay(2, 'sec')
+            sem.Delay(1, 'sec')
             if self.offline is False:
                 sem.NormalizeLenses(7)
-            sem.Delay(5, 'sec')
+            sem.Delay(1, 'sec')
             sem.SetDefocus(float(defocus[imaging_state]))
-            print(f"[InFO] Switchted to {imaging_state} imaging state with defocus set to {defocus[imaging_state]} um.")
         else:
             raise ValueError(f"imaging_state {imaging_state} is not in the list of pre-defined imaging states.")
 
     def precise_stage_move(self, stage_x_um=None, stage_y_um=None, stage_z_um=None, stage_tilt=0.0):
+
+        if self.offline:
+            print(f"[INFO] Stage move to {stage_x_um, stage_y_um, stage_z_um, stage_tilt}")
+
         backlashTilt = 2.0
-        backlashXY = 5.0
+        backlashXY = 2.0
 
         if stage_tilt is not None:
             current_tilt = sem.ReportTiltAngle()
@@ -287,7 +295,7 @@ class TEMComm:
     
     def precise_stage_move_relative(self, stage_x_um, stage_y_um, stage_z_um=None):
 
-        backlashXY = 5.0
+        backlashXY = 2.0
 
         if stage_x_um is None or stage_y_um is None:
             return
@@ -301,68 +309,33 @@ class TEMComm:
             sem.Delay(1, 'sec')
             sem.MoveStage(backlashXY, backlashXY, 0.0)
 
-    def report_matrix(self, kind, mag_index=0):
-        vals = getattr(sem, f"{kind}Matrix")(mag_index)
-        return np.array(vals[:4], dtype=float).reshape(2, 2)
-    
-    def report_stage_to_is_matrix(self, mode='R'):
-        if self.offline:
-            return None
-        sem.GoToLowDoseArea(mode)
-        stage_to_cam = self.report_matrix("stageToCamera", 0)
-        cam_to_is = self.report_matrix("CameraToIS", 0)
-        return cam_to_is @ stage_to_cam
-    
-    def report_camera_to_is_matrix(self, mode='R'):
-        if self.offline:
-            return None
-        sem.GoToLowDoseArea(mode)
-        return self.report_matrix("CameraToIS", 0)
-    
-    def get_image_center(self, buffer):
-
-        img = np.asarray(sem.bufferImage(buffer))  
-        ny, nx = img.shape[:2]
-    
-        center_xy = (nx / 2, ny / 2)              # (X, Y) — the order sem commands expect
-        center_rc = (ny // 2, nx // 2)            # (row, col) — the order for numpy indexing
-        
-        return center_xy
-    
-    def return_control_to_serialem(self, message):
-        try:
-            sem.Exit(0)
-        except Exception:
-            pass
-        self.wait_for_continue_trigger(message)
-        print("[INFO] Re-connecting to serialEM.")
-        sem.ConnectToSEM()
-        
-        
 
     # ---------------------------------------------------------------------------
     # Montage control
     # ---------------------------------------------------------------------------
     
-    def acquire_montage_at_nav_item(self, nav_idx, fov_um_x, fov_um_y, mode='Search', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
+    def acquire_montage_at_nav_item(self, site_data, nav_idx, fov_um_x, fov_um_y, mode='Search', imaging_state=None, eucentricity=False, label=None):
         sem.MoveToNavItem(nav_idx)
-        sem.Delay(1, 'sec')
-        montage_id, filepath = self.acquire_montage(mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, stage_tilt=stage_tilt, site_id=site_id, imaging_state=imaging_state, eucentricity=eucentricity)
-        return montage_id, filepath
+        sem.Delay(2, 'sec')
+        self.acquire_montage(site_data=site_data, mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, imaging_state=imaging_state, eucentricity=eucentricity, label=label)
 
 
-    def acquire_montage(self, fov_um_x, fov_um_y, mode='Search', stage_tilt=0.0, site_id=None, imaging_state=None, eucentricity=False):
-        
+    def acquire_montage(self, site_data, fov_um_x, fov_um_y, mode='Search', imaging_state=None, eucentricity=False, label=None):
+
+        if self.offline and site_data is not None:
+            print(f"Montage collected for {site_data.site_id}.")
+        elif self.offline:
+            print(f"Acquiring Montage.")
+
         self.prepare_imaging_state(mode=mode, imaging_state=imaging_state)
         
         if eucentricity is True:
             self.set_eucentricity(level='rough_fine')
         
-
         image_properties = self.get_image_properties(mode=mode, imaging_state=imaging_state)
 
-        tile_fov_um_x = image_properties["img_width_px"] * image_properties["pixel_size_um"]
-        tile_fov_um_y = image_properties["img_height_px"] * image_properties["pixel_size_um"]
+        tile_fov_um_x = image_properties["img_width_px"] * image_properties["pixel_spacing_um"]
+        tile_fov_um_y = image_properties["img_height_px"] * image_properties["pixel_spacing_um"]
 
         overlap_fraction = 0.15
         overlap_pxl_x = int(overlap_fraction * image_properties["img_width_px"])
@@ -376,13 +349,16 @@ class TEMComm:
 
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()
-        if site_id is not None:
-            filepath = os.path.join(self.output_root, site_id, site_id + '_montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
-            os.makedirs(os.path.join(self.output_root, site_id), exist_ok=True)
+        if site_data is not None and site_data.site_id is not None:
+            filepath = os.path.join(self.output_root, site_data.site_id, site_data.site_id + '_montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
+            os.makedirs(os.path.join(self.output_root, site_data.site_id), exist_ok=True)
         else:
             filepath = os.path.join(self.output_root, 'Montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
 
-        self.precise_stage_move(stage_tilt=stage_tilt)
+        if site_data is not None:
+            self.precise_stage_move(stage_tilt=site_data.milling_angle)
+        else:
+            self.precise_stage_move(stage_tilt=0.0)
         
         if imaging_state is None:
             if mode == 'View':
@@ -393,6 +369,7 @@ class TEMComm:
                 sem.ParamSetToUseForMontage(3, 1)
             else:
                 raise ValueError('Not a valid imaging mode for a montage.')
+        print(filepath)    
         sem.OpenNewMontage(nx, ny, filepath)
         sem.SetMontageParams(int(1),    # useStage = 1 (stage montage, required for hybrid usage of both image shift and stage shift)
                         overlap_pxl_x,    # overlap in x in pxl
@@ -406,14 +383,16 @@ class TEMComm:
                   # max image shift in micron, only relevant when first argument is 2, otherwise set to -1
 
         sem.Montage()
-        
-        if site_id is not None:
-            montage_id = f"{site_id}_montage_{timestamp}"
-            
+        if site_data is not None and site_data.site_id is not None:
+            montage_id = f"{site_data.site_id}_montage_{timestamp}"                  
         else:
             montage_id = f"Montage_{timestamp}"
+
         sem.NewMap(0, montage_id)
-        return montage_id, filepath
+        if site_data is not None:
+            self.mrc_reader.build_montage_summary(site_data=site_data, label=label, timestamp=timestamp)
+
+   ### HAVEN'T CLEANED UP BELOW YET - NEEDS TO BE REWRITTEN TO USE NEW ALIGNMENT FUNCTION
             
     # ---------------------------------------------------------------------------
     # Alignment routines

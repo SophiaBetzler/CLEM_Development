@@ -13,28 +13,29 @@ from clem_dataclasses import AllSitesDataCollection, SiteDataSummary
 
 
 
-PATH = r"C:\Users\CZII\Documents\Data\s26jul01b"
+PATH = r"C:\Users\CZII\Documents\Data\s26aug03a"
 SAMPLE_TYPE = 'airyscan'
 OFFLINE = True
 if SAMPLE_TYPE == 'airyscan':
     MILLING_ANGLE = 0.0
 else:
-    MILLING_ANGLE = 15.0
+    MILLING_ANGLE = -15.0
 
 
 if __name__ == "__main__":
 
     site_collection = AllSitesDataCollection()
 
-    mrc = MRCReader(coord_key="AlignedPieceCoordsVS", path=PATH, refine_alignment=False, section=0)
+    mrc = MRCReader(coord_key="AlignedPieceCoordsVS", section=0)
 
-    temcom = TEMComm(rotation=False, mrc_reader=mrc, path=PATH, offline=OFFLINE)
+    temcom = TEMComm(mrc_reader=mrc, path=PATH, offline=OFFLINE)
+
 
     exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, sample_type=SAMPLE_TYPE, milling_angle=MILLING_ANGLE, site_collection=site_collection)
 
     #exc.run_experiment_setup()
     print(["[INFO] Finished experiment setup."])
-    #exc.run_acquire_position_montages()
+    exc.run_acquire_position_montages()
     print(["[INFO] Finished acquiring position montages."])
     try:
         exc.run_clem_alignment()

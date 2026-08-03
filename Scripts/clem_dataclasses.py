@@ -41,27 +41,23 @@ class Tile:
     """One montage tile. Pixel coords are montage-pixel positions; stage coords
     are physical stage positions."""
     z_index: Optional[int] = None
-    stage_z_um: Optional[float] = None
-    pixel_x_um: Optional[float] = None
-    pixel_y_um: Optional[float] = None
-    stage_x_um: Optional[float] = None
-    stage_y_um: Optional[float] = None
-
+    piece_z_stage_um: Optional[float] = None
+    piece_x_px: Optional[float] = None
+    piece_y_px: Optional[float] = None
+    piece_x_stage_um: Optional[float] = None
+    piece_y_stage_um: Optional[float] = None
 
 @dataclass
 class Pick:
     pick_id: str
-    pixel_x_um: Optional[float] = None
-    pixel_y_um: Optional[float] = None
+    
     stage_x_um: Optional[float] = None
     stage_y_um: Optional[float] = None
     stage_z_um: Optional[float] = None
-    notes: Optional[str] = None
 
-    refined_stage_x: Optional[float] = None
-    refined_stage_y: Optional[float] = None
-    refined_stage_z: Optional[float] = None
-
+    image_coord_x: Optional[float] = None
+    image_coord_y: Optional[float] = None
+    
     record_img_path: Optional[str] = None
     view_crop_path: Optional[str] = None
 
@@ -69,22 +65,15 @@ class Pick:
     image_shift_y: Optional[float] = None
 
     is_tracking_target: bool = False
-    refinement_quality: Optional[str] = None
-
-    def has_refinement(self) -> bool:
-        return self.refined_stage_x is not None
 
     def get_stage_position(self) -> tuple:
-        if self.refined_stage_x is not None:
-            return (self.refined_stage_x, self.refined_stage_y, self.refined_stage_z)
-        else:
-            return (self.stage_x_um, self.stage_y_um, self.stage_z_um)
+        return (self.stage_x_um, self.stage_y_um, self.stage_z_um)
         
     def get_image_shift(self) -> tuple[float, float]:
-        return (
-            float(self.image_shift_x or 0.0),
-            float(self.image_shift_y or 0.0),
-        )
+        return (float(self.image_shift_x or 0.0), float(self.image_shift_y or 0.0),)
+
+    def get_image_position(self) -> tuple[float, float]:
+        return (float(self.image_coord_x), float(self.image_coord_y))
 
 
 @dataclass
@@ -99,8 +88,23 @@ class TargetGroup:
 # --------------------------------------------------------------------------- #
 
 @dataclass
+class ImageSummary:
+    image_path: Optional[str] = None
+    image_id: Optional[str] = None
+    image_height: Optional[int] = None
+    image_width: Optional[int] = None
+    magnification: Optional[int] = None
+    pixel_spacing_um: Optional[int] = None
+    stage_to_camera_matrix: Optional[Any] = None
+    is_to_camera_matrix: Optional[Any] = None 
+    timestamp: Optional[str] = None
+
+
+@dataclass
 class MRCSummary:
     mrc_path: Optional[str] = None
+    montage_id: Optional[str] = None
+    stage_z_um: Optional[float] = None
     image: Optional[Any] = None                 # np.ndarray (assembled montage)
     image_height: Optional[int] = None
     image_width: Optional[int] = None
@@ -112,11 +116,36 @@ class MRCSummary:
     rotation_deg: Optional[float] = None
     min_x_pixels: Optional[float] = None
     min_y_pixels: Optional[float] = None
+    metadata: Optional[MontageMetadata] = None
     tiles: list[Tile] = field(default_factory=list)
-    stage_matrix: Optional[Any] = None          # np 3x3, or None
     stage_fit: Optional[dict] = None            # diagnostics leaf
     flip_x: Optional[bool] = None
     flip_y: Optional[bool] = None
+    stage_tilt_deg: Optional[float] = None
+    picks: list[Pick] = field(default_factory=list)
+    groups: list[TargetGroup] = field(default_factory=list) 
+
+    def add_pick(self, pick_id, pixel_x_um=None, pixel_y_um=None,
+                     stage_x_um=None, stage_y_um=None, stage_z_um=None, notes=None):
+        self.picks.append(Pick(
+            pick_id=pick_id,
+            pixel_x_um=pixel_x_um, pixel_y_um=pixel_y_um,
+            stage_x_um=stage_x_um, stage_y_um=stage_y_um,
+            stage_z_um=stage_z_um, notes=notes,
+        ))
+        return self
+
+@dataclass
+class MontageMetadata:
+    pixel_spacing_um: Optional[float] = None
+    image_width_px: Optional[int] = None
+    image_height_px: Optional[int] = None
+    piece_spacing_x_px: Optional[int] = None
+    piece_spacing_y_px: Optional[int] = None
+    stage_z_um: Optional[float] = None
+    magnification: Optional[int] = None
+    rotation_deg: Optional[float] = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -161,21 +190,23 @@ class Acquisition:
 @dataclass
 class SiteDataSummary:
     site_id: str
-    path: str                                   # the site folder
-    mrc: Optional[MRCSummary] = None
-    tiff: Optional[TiffSummary] = None
+    path: str                
+    milling_angle: float                   
+    stage_position: list = field(default_factory=list)
+    stage_position_high_mag: list = field(default_factory=list)
+    mrcs: dict[str, MRCSummary] = field(default_factory=dict)
+    images: dict[str, ImageSummary] = field(default_factory=dict)
+    tiffs: dict[str, TiffSummary] = field(default_factory=dict)
+    transforms: dict[str, TransformRecord] = field(default_factory=dict)
     registration: Optional[RegistrationSummary] = None
-    acquisition: Optional[Acquisition] = None
-    picks: list[Pick] = field(default_factory=list)
-    groups: list[TargetGroup] = field(default_factory=list)
+    
 
     # -------- MRC: reader builds the MRCSummary; we just assign it ---------- #
     def populate_mrc(self, mrc_reader, mrc_filepath):
-        """No transcription: build_montage_summary already returns an
-        MRCSummary, so this is a direct hand-off."""
+        self.mrc.load_mrc_montage(mrc_filepath) 
         self.mrc = mrc_reader.build_montage_summary(mrc_filepath)
         return self
-
+    
     # -------- TIFF: build the TiffSummary from the low-level loader --------- #
     def populate_tiff(self, mrc_reader, tiff_filepath):
         stack, info = mrc_reader.load_ome_tiff(tiff_filepath)
@@ -237,59 +268,19 @@ class SiteDataSummary:
         )
         return self
 
-    # -------- Acquisition / picks ------------------------------------------ #
-    def set_acquisition_from_csv_row(self, row):
-        self.acquisition = Acquisition(
-            stage_x_um=row.get("stage_x_um"),
-            stage_y_um=row.get("stage_y_um"),
-            stage_z_um=row.get("stage_z_um"),
-            stage_tilt=row.get("stage_tilt"),
-        )
-        return self
+    def add_image(self, label, image_parameters):
+        self.images[label] = ImageSummary(image_id=image_parameters['image_id'],
+                                          image_path=image_parameters['image_path'],
+                                          image_height=image_parameters['image_height'],
+                                          image_width=image_parameters['image_width'],
+                                          magnification=image_parameters['magnification'],
+                                          pixel_spacing_um=image_parameters['pixel_spacing'],
+                                          stage_to_camera_matrix=image_parameters['stage_to_camera_matrix'],
+                                          is_to_camera_matrix=image_parameters['is_to_camera_matrix'],
+                                          timestamp=image_parameters['timestamp']
+                                          )
 
-    def add_pick(self, pick_id, pixel_x_um=None, pixel_y_um=None,
-                 stage_x_um=None, stage_y_um=None, stage_z_um=None, notes=None):
-        self.picks.append(Pick(
-            pick_id=pick_id,
-            pixel_x_um=pixel_x_um, pixel_y_um=pixel_y_um,
-            stage_x_um=stage_x_um, stage_y_um=stage_y_um,
-            stage_z_um=stage_z_um, notes=notes,
-        ))
-        return self
 
-    # -------- Convenience accessors ---------------------------------------- #
-    @property
-    def pixel_spacing_um(self):
-        return self.mrc.pixel_spacing_um if self.mrc else None
-
-    @property
-    def image(self):
-        if self.mrc is not None and getattr(self.mrc, "image", None) is not None:
-            return self.mrc.image
-        return None
-
-    @image.setter
-    def image(self, value):
-        if self.mrc is None:
-            self.mrc = MRCSummary(image=value)
-        else:
-            self.mrc.image = value
-
-    @property
-    def mrc_full(self):
-        return self.image
-
-    @mrc_full.setter
-    def mrc_full(self, value):
-        self.image = value
-
-    @property
-    def montage_image(self):
-        return self.image
-
-    @property
-    def warped_channels(self):
-        return self.registration.warped_channels if self.registration else None
 
     # ======================================================================= #
     # Persistence
@@ -300,6 +291,7 @@ class SiteDataSummary:
     # load() rebuilds the entire tree; the returned object is ready to use with
     # no re-linking needed.
     # ======================================================================= #
+
     def make_pickle_path(self):
         """<site folder>/<site_id>_<YYYYmmdd-HH-MM-SS>.pkl -- new name per save,
         so nothing is overwritten."""
