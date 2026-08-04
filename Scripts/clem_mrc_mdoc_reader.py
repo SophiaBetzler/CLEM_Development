@@ -167,20 +167,40 @@ class MRCReader:
                 return (0, 0.0)
         return max(candidates, key=_recency)
 
+    @staticmethod
+    def _site_folder(site_data):
+        """Site folder as a Path.  Accepts a SiteDataSummary (whose .path is a
+        str), a Path, or a plain string, so the finders below work no matter
+        which of the three a caller hands them."""
+        folder = getattr(site_data, "path", site_data)
+        if folder is None:
+            raise ValueError("No site folder: site_data.path is not set.")
+        folder = Path(os.fspath(folder))
+        if not folder.is_dir():
+            raise NotADirectoryError(f"Site folder does not exist: {folder}")
+        return folder
+
     def _find_latest_montage_mrc(self, site_data):
-        matches = [p for p in site_data.path.glob("*montage*.mrc") if p.is_file()]
+        folder = self._site_folder(site_data)
+        matches = [p for p in folder.glob("*montage*.mrc") if p.is_file()]
+        if not matches:                          # fall back to any .mrc / .rec
+            matches = [p for p in (*folder.glob("*.mrc"), *folder.glob("*.rec"))
+                       if p.is_file()]
         if not matches:
-            raise FileNotFoundError(f"No montage .mrc found in {site_data.path}")
+            raise FileNotFoundError(f"No montage .mrc found in {folder}")
         return max(matches, key=lambda p: p.stat().st_mtime)
-        
+
     def _find_latest_ome_tiff(self, site_data):
-        matches = list(site_data.path.glob("*.ome.tif")) + list(site_data.path.glob("*.ome.tiff")) 
+        folder = self._site_folder(site_data)
+        matches = [p for p in (*folder.glob("*.ome.tif"), *folder.glob("*.ome.tiff"))
+                   if p.is_file()]
         if not matches:
-            raise FileNotFoundError(f"No OME-TIFF found in {site_data.path}")
+            raise FileNotFoundError(f"No OME-TIFF found in {folder}")
         return max(matches, key=lambda p: p.stat().st_mtime)
-    
+
     def _find_latest_czi(self, site_data):
-        matches = list(site_data.path.glob("*.czi"))
+        folder = self._site_folder(site_data)
+        matches = [p for p in folder.glob("*.czi") if p.is_file()]
         return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
     def _fit_latest_transfer(self, site_data):
@@ -244,22 +264,12 @@ class MRCReader:
     # Loaders
     # ------------------------------------------------------------------ #
 
-    def create_site_data_class(self, site_id):
-        site_data = SiteDataSummary(site_id=site_id, path=str(self._get_site_folder(site_id)))
-        self.load_mrc_into_data_class(site_data, self._find_latest_montage_mrc(site_id))
-        try:                                        # OME-TIFF is optional
-            self.load_tiff_into_data_class(site_data, self._find_latest_ome_tiff(site_id))
-        except FileNotFoundError:
-            print(f"[INFO] No OME-TIFF for {site_id}.")
-        czi_path = self._find_latest_czi(site_id)   # auto-import CZI overview if present
-        if czi_path is not None:
-            try:
-                site_data.populate_czi(self, czi_path)
-                print(f"[INFO] Imported CZI overview: {os.path.basename(str(czi_path))}")
-            except Exception as e:
-                print(f"[WARN] Skipping CZI {os.path.basename(str(czi_path))}: {e}")
-        return site_data
-    
+    # NOTE: create_site_data_class() was removed -- it was never called
+    # (ExecutiveControls.run_acquire_position_montages builds SiteDataSummary
+    # directly) and referenced a _get_site_folder() method that does not exist.
+    # The _find_latest_* helpers above are the reusable part; call them with a
+    # SiteDataSummary, a Path, or a folder string.
+
     def load_mrc_into_data_class(self, site_data, mrc_path):
         mrc_montage = site_data.populate_mrc(self, mrc_path)   # stores into site_data.mrcs[label]
         site_data.registration = None
@@ -728,4 +738,3 @@ class MRCReader:
             self.load_mrc_montage(mrc_filepath=mrc_filepath) 
         self.show(mrc_filepath=mrc_filepath, contrast_percentiles=(1.0, 99.))
         return self.build_montage_summary(mrc_filepath = mrc_filepath)
-    

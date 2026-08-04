@@ -740,22 +740,56 @@ class RegistrationApp(tk.Tk):
         legacy = getattr(self.site_data, "tiff", None)     # legacy fallback
         return legacy if self._tiff_has_data(legacy) else None
 
+    MRC_EXTS = (".mrc", ".rec", ".mrcs", ".map", ".st")
+
+    def _candidate_mrcs_in_folder(self, folder):
+        """All MRC-like files in the site folder (then one level of subfolders),
+        newest last.  Files that have an mdoc beside them come first, because
+        build_montage_summary() needs one."""
+        folder = Path(folder)
+        found = []
+        for pattern in ("*", "*/*"):
+            for p in folder.glob(pattern):
+                if p.is_file() and p.suffix.lower() in self.MRC_EXTS:
+                    found.append(p)
+            if found:
+                break
+        finder = getattr(self.mrc_reader, "_find_mdoc_path", None)
+
+        def _has_mdoc(p):
+            if not callable(finder):
+                return True
+            try:
+                return finder(mrc_filepath=str(p)) is not None
+            except Exception:
+                return False
+
+        return sorted(found, key=lambda p: (_has_mdoc(p), p.stat().st_mtime))
+
     def _load_latest_mrc_from_folder(self):
+        """Pull the newest MRC montage sitting in the site folder into the
+        dataclass and return its MRCSummary.  Tries candidates newest-first so
+        a single bad/mdoc-less file does not abort the auto-load."""
         folder = getattr(self.site_data, "path", None)
         if not folder:
             return None
-        folder = Path(folder)
-        mrcs = sorted([*folder.glob("*.mrc"), *folder.glob("*.rec")],
-                    key=lambda p: p.stat().st_mtime)
-        if not mrcs:
+        candidates = self._candidate_mrcs_in_folder(folder)
+        if not candidates:
+            self.status_var.set(f"No MRC file found in {folder}")
             return None
-        try:
-            return self.mrc_reader.load_mrc_into_data_class(
-                site_data=self.site_data, mrc_path=str(mrcs[-1]))
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            self.status_var.set(f"Could not load MRC from folder: {e}")
-            return None
+        last_err = None
+        for p in reversed(candidates):
+            try:
+                mrc_dc = self.mrc_reader.load_mrc_into_data_class(
+                    site_data=self.site_data, mrc_path=str(p))
+                if mrc_dc is not None:
+                    return mrc_dc
+            except Exception as e:
+                last_err = e
+                print(f"[WARN] Skipping {p.name}: {type(e).__name__}: {e}")
+        if last_err is not None:
+            self.status_var.set(f"Could not load MRC from folder: {last_err}")
+        return None
 
     def _load_latest_tiff_from_folder(self):
         """tif AND czi both empty in the dataclass: pull the newest LM file
@@ -800,8 +834,11 @@ class RegistrationApp(tk.Tk):
     # ---------------- display of stored site data ----------------
 
     def _display_loaded_site_data(self):
-        # MRC: newest entry from the site's mrc dictionary.
+        # MRC: newest entry from the site's mrc dictionary; if the dictionary is
+        # empty, pull the newest MRC montage from the site folder into it.
         mrc_dc = self._resolve_latest_mrc()
+        if mrc_dc is None:
+            mrc_dc = self._load_latest_mrc_from_folder()
         if mrc_dc is not None:
             self._display_loaded_mrc_data(mrc_dc)
 
@@ -1018,16 +1055,40 @@ class RegistrationApp(tk.Tk):
 
     # ---------------- loading ----------------
 
+    def _resolve_picked_mrc_path(self, path):
+        """Accept either an MRC-like file or an .mdoc; for an .mdoc, return the
+        MRC it belongs to."""
+        p = Path(path)
+        if p.suffix.lower() != ".mdoc":
+            return p
+        stem = p.with_suffix("")                       # foo.mrc.mdoc -> foo.mrc
+        if stem.suffix.lower() in self.MRC_EXTS and stem.is_file():
+            return stem
+        for ext in self.MRC_EXTS:                      # foo.mdoc -> foo.mrc
+            cand = p.with_suffix(ext)
+            if cand.is_file():
+                return cand
+        raise FileNotFoundError(f"No MRC file found next to {p.name}.")
+
     def _load_mrc_mdoc(self):
         path = filedialog.askopenfilename(title="Open MRC montage",
-            filetypes=[("MRC", ("*.mrc", "*.rec", "*.mrcs", "*.map")), ("All files", "*")])
+            initialdir=getattr(self.site_data, "path", None) or None,
+            filetypes=[("MRC / mdoc", ("*.mrc", "*.rec", "*.mrcs", "*.map", "*.st", "*.mdoc")),
+                       ("MRC", ("*.mrc", "*.rec", "*.mrcs", "*.map", "*.st")),
+                       ("All files", "*")])
         if not path:
             return
         try:
-            #self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
-            mrc_dc = self._resolve_latest_mrc()
+            mrc_path = self._resolve_picked_mrc_path(path)
+            mrc_dc = self.mrc_reader.load_mrc_into_data_class(
+                site_data=self.site_data, mrc_path=str(mrc_path))
             if mrc_dc is None:
-                raise RuntimeError("MRC was not stored in site_data.mrcs.")
+                # Older readers return None and only write into the dataclass.
+                mrc_dc = self._resolve_latest_mrc()
+            if mrc_dc is None:
+                raise RuntimeError(
+                    f"{Path(mrc_path).name} was not stored in site_data.mrcs "
+                    f"(load_mrc_into_data_class returned nothing).")
             self._display_loaded_mrc_data(mrc_dc)
             if getattr(mrc_dc, "mrc_path", None):
                 self.tem.load_mrc_in_nav(mrc_dataclass=mrc_dc, buffer='S')
