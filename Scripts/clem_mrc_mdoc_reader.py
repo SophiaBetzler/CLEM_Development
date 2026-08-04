@@ -531,9 +531,11 @@ class MRCReader:
         written = []
         for pick in mrc_dataclass.picks:
             if skip_pick_id is not None and pick.pick_id == skip_pick_id:
-                written.append(None)
-                continue
-            crop = self._crop_centered_at_pixel_coord(mrc_dataclass.image, pick.image_coord_x, pick.image_coord_y, pixel_spacing_um, fov_um)
+                written.append(None); continue
+            px, py = pick.image_coord_x, pick.image_coord_y
+            if mrc_dataclass.flip_x: px = mrc_dataclass.image_width  - 1 - px
+            if mrc_dataclass.flip_y: py = mrc_dataclass.image_height - 1 - py
+            crop = self._crop_centered_at_pixel_coord(mrc_dataclass.image, px, py, pixel_spacing_um, fov_um)
             crop = correct_image(crop)
             out = f"{output_root}_{label}_{pick.pick_id}.mrc"
             with mrcfile.new(out, overwrite=True) as mrc:
@@ -543,26 +545,26 @@ class MRCReader:
             written.append(out)
         return written
 
-
-    def write_multichannel_crops(self, site_data, warp_slice, n_channels, n_z,
+    def write_multichannel_crops(self, mrc_dataclass, warp_slice, n_channels, n_z,
                                 fov_um, output_root, pixel_spacing_um, prefix=""):
         cw = self._fov_in_px(pixel_spacing_um, fov_um)
-        picks = site_data.picks
-        stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), dtype=np.float32) for _ in picks]
-
-        for pi, pick in enumerate(picks):                       # channel 0 = TEM
-            crop = self._crop_centered_at_pixel_coord(
-                site_data.mrc.image, pick.pixel_x_um, pick.pixel_y_um, fov_um)
+        picks = mrc_dataclass.picks
+        stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), np.float32) for _ in picks]
+        def to_true(px, py):
+            if mrc_dataclass.flip_x: px = mrc_dataclass.image_width  - 1 - px
+            if mrc_dataclass.flip_y: py = mrc_dataclass.image_height - 1 - py
+            return px, py
+        for pi, pick in enumerate(picks):                 # channel 0 = TEM montage
+            px, py = to_true(pick.image_coord_x, pick.image_coord_y)
+            crop = self._crop_centered_at_pixel_coord(mrc_dataclass.image, px, py, pixel_spacing_um, fov_um)
             for z in range(n_z):
                 stacks[pi][z, 0] = crop
-
-        for c in range(n_channels):                             # channels 1..N = warped FL
+        for c in range(n_channels):                       # channels = warped FL
             for z in range(n_z):
                 full = warp_slice(c, z)
                 for pi, pick in enumerate(picks):
-                    stacks[pi][z, c + 1] = self._crop_centered_at_pixel_coord(
-                        full, pick.pixel_x_um, pick.pixel_y_um, fov_um)
-
+                    px, py = to_true(pick.image_coord_x, pick.image_coord_y)
+                    stacks[pi][z, c + 1] = self._crop_centered_at_pixel_coord(full, px, py, pixel_spacing_um, fov_um)
         res = (1.0 / pixel_spacing_um) if pixel_spacing_um > 0 else 1.0
         labels = (["TEM"] + [f"Ch{c}" for c in range(n_channels)]) * n_z
         os.makedirs(os.path.dirname(output_root) or ".", exist_ok=True)

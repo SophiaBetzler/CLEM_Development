@@ -360,11 +360,8 @@ class StagePickerWindow(tk.Toplevel):
         btn = ttk.Frame(side); btn.grid(row=2, column=0, sticky="ew", pady=(2, 4))
         btn.columnconfigure(0, weight=1); btn.columnconfigure(1, weight=1)
         fov = ttk.Frame(btn); fov.grid(row=0, column=0, columnspan=2, sticky="ew")
-        ttk.Label(fov, text="FOV width (um):", style="Sm.TLabel").pack(side="left")
-        self._fov_var = tk.StringVar(value="")
-        ttk.Entry(fov, textvariable=self._fov_var, width=8).pack(side="left", padx=(4, 0))
-        ttk.Button(btn, text="Export to TXT (+ FOV crops)", style="Accent.TButton",
-                   command=self._export).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+
+
         ttk.Button(btn, text="Remove last", style="Danger.TButton",
                    command=self._remove_last).grid(row=2, column=0, sticky="ew", padx=(0, 2))
         ttk.Button(btn, text="Clear all", style="Danger.TButton",
@@ -502,10 +499,9 @@ class StagePickerWindow(tk.Toplevel):
             except Exception: pass
         self._pt_artists = []
         for i, pick in enumerate(self._picks):
-            x, y = self.clem_picker.convert_montage_to_display_orientation(
-                pick.image_coord_x, pick.image_coord_y)
+            x, y = pick.image_coord_x, pick.image_coord_y      # already display coords
             dot, = self._ax.plot(x, y, "o", color=CYA, markersize=6,
-                                 markeredgecolor="white", markeredgewidth=0.8, zorder=6)
+                                markeredgecolor="white", markeredgewidth=0.8, zorder=6)
             txt = self._ax.text(x + 9, y - 9, str(i + 1), color=CYA,
                                 fontsize=8, fontweight="bold", zorder=7)
             self._pt_artists.extend([dot, txt])
