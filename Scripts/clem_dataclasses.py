@@ -173,6 +173,7 @@ class RegistrationSummary:
     flip_y: bool = False
     warped_channels: Optional[list] = None       # list[np.ndarray]
     rotation_deg: Optional[float] = 0.0
+    overlay_center_px: Optional[tuple] = None
 
 
 @dataclass

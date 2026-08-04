@@ -359,11 +359,13 @@ class CLEMPicker:
                     pixel_spacing_um=self.mrc_dataclass.pixel_spacing_um, output_root=os.path.join(str(self.site_output_root), "picks", "crop"), skip_pick_id=group.tracking.pick_id)
             
             nav_indices = self.add_picks_to_navigator(self.mrc_dataclass, buffer=self.nav_map_buffer)
-            ref_crops = self.mrc_reader.write_mrc_crops(
-                                                    mrc_dataclass=self.mrc_dataclass, fov_um=crop_fov,
-                                                    pixel_spacing_um=self.mrc_dataclass.pixel_spacing_um,
-                                                    output_root=os.path.join(str(self.site_output_root), "picks", "target_overlays"),
-                                                    skip_pick_id=group.tracking.pick_id)
+            if warp_slice is not None and n_channels > 0:
+                self.mrc_reader.write_multichannel_crops(
+                    mrc_dataclass=self.mrc_dataclass,
+                    warp_slice=warp_slice, n_channels=n_channels, n_z=n_z,
+                    fov_um=crop_fov,
+                    output_root=os.path.join(str(self.site_output_root), "picks", "target_overlays"),
+                    pixel_spacing_um=self.mrc_dataclass.pixel_spacing_um)
         #xg1_files.append(self.generate_xg1_file(group, output_folder))
 
         return groups, xg1_files

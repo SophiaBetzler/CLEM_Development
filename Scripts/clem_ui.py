@@ -1301,6 +1301,11 @@ class RegistrationApp(tk.Tk):
         self.warped_channels = result["warped_channels"]
         C = len(self.warped_channels); mrc_h, mrc_w = self.mrc_image.shape
         fit_txt = result["fit_info"]["text"]
+        H_t, W_t = self.tiff_stack.shape[-2:]                 # (Y, X) of a TIFF slice
+        c = self._last_tform(np.array([[W_t / 2.0, H_t / 2.0]]))[0]
+        overlay_center_px = (float(c[0]), float(c[1]))        # display-MRC montage pixels
+        self.site_data.registration.overlay_center_px = overlay_center_px
+        self.overlay_center_px = overlay_center_px            # convenience handle for the script
         self.status_var.set(f"{ttype.capitalize()} applied -- {C} ch warped.\n{fit_txt}\nClick Show Overlay.")
         messagebox.showinfo("Done",
             f"{ttype.capitalize()} from {result['n_pairs']} pairs.\n"

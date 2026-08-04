@@ -104,12 +104,14 @@ class ExecutiveControls:
         input('[ToDO] Move feature suitable for eucentricity alignment to the center of the stage (shift + right click + drag). ENTER')
         self.tem.set_eucentricity(level='rough')
         self.tem.acquire_montage(site_data=None, mode='Search', imaging_state='LMM', fov_um_x=3000.0, fov_um_y=3000.0, eucentricity=False)
+        from clem_tem_stage_coordinates_tool import App
+        app = App()
+        app.mainloop()
         self.tem.acquire_image(mode='View', imaging_state='grid_square') 
         self.tem.return_control_to_serialem(message="[ToDo] Run 'align to marker' alignment. ENTER.")
 
     def run_acquire_position_montages(self):
         from clem_dataclasses import SiteDataSummary
-        input('[ToDo] Use either clem_airyscan_tool or clem_arctis_tool to create tem_stage_positions.csv and copy it to the experiment folder. ENTER')
         sites = self._import_csv_file(filename='tem_stage_positions.csv')
         for site_number, site in enumerate(sites):
             site_id = site.get("name") or f"site_{site_number+1:02d}"
@@ -150,16 +152,19 @@ class ExecutiveControls:
 
     def run_clem_alignment(self):
         from clem_ui import RegistrationApp   
-        from clem_dataclasses import SiteDataSummary
         for site_id, site_data in self.site_collection.sites.items():
             ui = RegistrationApp(mrc_reader=self.mrc_reader, site_data=site_data, tem_communication=self.tem)
             ui.mainloop()
             if self.sample_type == 'airyscan':
-                #MOVE Stage to center of overlay montage
-                #Run alignment one more time with the predefined alignment
-                print('airyscan alignment complete. Please move to the next site and press ENTER to continue.')
+                cx, cy = site_data.registration.overlay_center_px  
+                idx = self.tem.add_nav_point_with_note(cx, cy, buffer="S", note=None)
+                self.tem.move_stage_to_nav_item(nav_idx=idx)
+                self.tem.acquire_montage_at_nav_item(site_data=site_data, mode='View', nav_idx=idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x_high_mag'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y_high_mag'], eucentricity=True)
+                self.tem.delete_nav_item(nav_idx=idx)
+                ui = RegistrationApp(mrc_reader=self.mrc_reader, site_data=site_data, tem_communication=self.tem)
+                ui.mainloop()
             elif self.sample_type == 'lamella':
-                print('lamella alignment complete. Please move to the next site and press ENTER to continue.')
+                print('Lamella alignment complete. Please move to the next site and press ENTER to continue.')
         return self.site_summaries
 
 

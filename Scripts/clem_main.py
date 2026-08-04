@@ -10,7 +10,7 @@ import scipy
 from clem_dataclasses import AllSitesDataCollection, SiteDataSummary
 
 
-PATH = r"C:\Users\CZII\Documents\Data\s26jul09a"
+PATH = r"C:\Users\CZII\Documents\Data\s26jul23a"
 SAMPLE_TYPE = 'airyscan'
 OFFLINE = True
 if SAMPLE_TYPE == 'airyscan':
@@ -30,7 +30,7 @@ if __name__ == "__main__":
 
     exc = ExecutiveControls(tem_communication=temcom, mrc_reader=mrc, sample_type=SAMPLE_TYPE, milling_angle=MILLING_ANGLE, site_collection=site_collection)
 
-    #exc.run_experiment_setup()
+    exc.run_experiment_setup()
     print(["[INFO] Finished experiment setup."])
     exc.run_acquire_position_montages()
     print(["[INFO] Finished acquiring position montages."])

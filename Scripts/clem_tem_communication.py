@@ -44,6 +44,12 @@ class TEMComm:
         nav_file = os.path.join(self.output_root, "nav_file" + "_" + timestamp + '.nav')
         sem.OpenNavigator(nav_file)
 
+    def add_nav_point_with_note(self, px, py, buffer="S", note=None):
+        if note is None:
+            raise ValueError("Note cannot be None")
+        idx = int(sem.AddImagePosAsNavPoint(buffer, px, py, 0, 1))
+        sem.ChangeItemNote(idx, note)
+        return idx
 
     def add_nav_point(self, mrc_dataclass, buffer="S"):
         self.set_montage_to_buffer(note=mrc_dataclass.montage_id, buffer=buffer)
@@ -311,6 +317,18 @@ class TEMComm:
             sem.Delay(1, 'sec')
             sem.MoveStage(backlashXY, backlashXY, 0.0)
 
+    def move_stage_to_nav_item(self, nav_idx):
+        if self.offline:
+            print(f"[INFO] Stage move to nav item {nav_idx}.")
+            return
+        sem.MoveToNavItem(nav_idx)
+        sem.Delay(2, 'sec')
+
+    def delete_nav_item(self, nav_idx):
+        if nav_idx > 0:
+            sem.SetSelectedNavItem(nav_idx)   
+            sem.DeleteNavigatorItem()    
+
 
     # ---------------------------------------------------------------------------
     # Montage control
@@ -371,8 +389,7 @@ class TEMComm:
                 print('imaging mode is search')
                 sem.ParamSetToUseForMontage(3, 1)
             else:
-                raise ValueError('Not a valid imaging mode for a montage.')
-        print(filepath)    
+                raise ValueError('Not a valid imaging mode for a montage.')   
         sem.OpenNewMontage(nx, ny, filepath)
         sem.SetMontageParams(int(1),    # useStage = 1 (stage montage, required for hybrid usage of both image shift and stage shift)
                         overlap_pxl_x,    # overlap in x in pxl
@@ -390,8 +407,8 @@ class TEMComm:
             montage_id = f"{site_data.site_id}_montage_{timestamp}"                  
         else:
             montage_id = f"Montage_{timestamp}"
-
-        sem.NewMap(0, montage_id)
+        if self.offline is False:
+            sem.NewMap(0, montage_id)
         if site_data is not None:
             self.mrc_reader.build_montage_summary(site_data=site_data, label=label, timestamp=timestamp)
 
