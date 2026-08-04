@@ -1,3 +1,4 @@
+from email.mime import base
 import re
 import os
 import mrcfile
@@ -22,6 +23,23 @@ class MRCReader:
     # ------------------------------------------------------------------ #
     # Small helpers for stage coordinate readout
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _extract_scalar(value):
+        """Best-effort float from an mdoc value that may be scalar or list."""
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple, np.ndarray)):
+            value = value[0] if len(value) else None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _available_coord_keys(self, pieces):
+        """Coordinate fields present for every piece (used in error text)."""
+        return [k for k in self.COORD_KEYS
+                if pieces and all(p.get(k) is not None for p in pieces)]
 
     @staticmethod
     def _get_coords(piece, coord_key):
@@ -136,9 +154,18 @@ class MRCReader:
     # File / coordinate-field discovery
     # ------------------------------------------------------------------ #
     def _find_latest_mrc_dataclass(self, site_data):
-        candidates = [m for m in site_data.mrcs.values() if m and m.timestamp]
-        latest_mrc_dataclass = max(candidates, key=lambda m: m.timestamp) if candidates else None
-        return latest_mrc_dataclass
+        candidates = [m for m in site_data.mrcs.values() if m is not None]
+        if not candidates:
+            return None
+        def _recency(m):
+            ts = getattr(m, "timestamp", None)
+            if ts:
+                return (1, ts)
+            try:
+                return (0, os.path.getmtime(m.mrc_path))
+            except (OSError, TypeError):
+                return (0, 0.0)
+        return max(candidates, key=_recency)
 
     def _find_latest_montage_mrc(self, site_data):
         matches = [p for p in site_data.path.glob("*montage*.mrc") if p.is_file()]
@@ -488,9 +515,8 @@ class MRCReader:
         cw = max(2, int(round(fov_um / spacing_um)))
         return cw
         
-    def write_mrc_crops(self, site_data, fov_um, pixel_spacing_um, output_root=None,
+    def write_mrc_crops(self, mrc_dataclass, fov_um, pixel_spacing_um, output_root=None,
                     label='crop', skip_pick_id=None):
-     
 
         def correct_image(crop):
             sat = crop >= 1.0
@@ -499,15 +525,15 @@ class MRCReader:
             return crop
 
         if output_root is None:
-            output_root = os.path.join(site_data.path, "picks", "crop")
+            output_root = os.path.join(os.path.dirname(mrc_dataclass.mrc_path), "picks", "crop")
         os.makedirs(os.path.dirname(output_root) or ".", exist_ok=True)
 
         written = []
-        for pick in site_data.picks:
+        for pick in mrc_dataclass.picks:
             if skip_pick_id is not None and pick.pick_id == skip_pick_id:
                 written.append(None)
                 continue
-            crop = self._crop_centered_at_pixel_coord(site_data.mrc.image, pick.pixel_x_um, pick.pixel_y_um, fov_um)
+            crop = self._crop_centered_at_pixel_coord(mrc_dataclass.image, pick.image_coord_x, pick.image_coord_y, pixel_spacing_um, fov_um)
             crop = correct_image(crop)
             out = f"{output_root}_{label}_{pick.pick_id}.mrc"
             with mrcfile.new(out, overwrite=True) as mrc:
@@ -611,9 +637,7 @@ class MRCReader:
     # Create Dictionary Output Summarizing aligned Montage
     # ------------------------------------------------------------------ #
 
-    def build_montage_summary(self, site_data, timestamp, label="Montage_"):
-        mrc_filepath = os.path.join(site_data.path, f"{label}{timestamp}.mrc")
-
+    def build_montage_summary(self, mrc_filepath, site_id=None):
         mdoc_path = self._find_mdoc_path(mrc_filepath=mrc_filepath)
         if mdoc_path is None:
             raise FileNotFoundError(f"No .mdoc found next to {os.path.basename(mrc_filepath)}.")
@@ -664,10 +688,8 @@ class MRCReader:
                             piece_x_stage_um=(st or {}).get("stage_x_um"),
                             piece_y_stage_um=(st or {}).get("stage_y_um")))
 
-        if site_data.site_id is not None:
-            montage_id = f"{site_data.site_id}_montage_{timestamp}"                  
-        else:
-            montage_id = f"Montage_{timestamp}"
+        base = os.path.splitext(os.path.basename(mrc_filepath))[0]
+        montage_id = f"{site_id}_montage_{base}" if site_id else f"montage_{base}"
 
         metadata = MontageMetadata(
                                     pixel_spacing_um=pixel_spacing_um,
@@ -675,7 +697,7 @@ class MRCReader:
                                     image_height_px=img_h,
                                     piece_spacing_x_px=ps_x,
                                     piece_spacing_y_px=ps_y,
-                                    stage_z_um=float(stage_z) if stage_z is not None else None,
+                                    stage_z_um=(float(stage_z) if stage_z is not None else float(global_stage_z) if global_stage_z is not None else 0.0),
                                     magnification=self._extract_scalar(global_info.get("Magnification")),
                                     rotation_deg=float(np.rad2deg(theta)),
                                     raw=dict(global_info),
@@ -691,12 +713,10 @@ class MRCReader:
             section=self.section, alignment=alignment, coord_field=key,
             rotation_deg=float(np.rad2deg(theta)),
             min_x_pixels=min_x, min_y_pixels=min_y,
+            stage_z_um=float(global_stage_z) if global_stage_z is not None else None,
             tiles=tiles,
-            stage_matrix=M, stage_fit=fit,
             flip_x=self.MONTAGE_FLIP_X, flip_y=self.MONTAGE_FLIP_Y,
-            stage_to_camera_matrix = stage_to_camera_matrix,
-            image_shift_to_camera_matrix = is_to_camera_matrix,
-        )
+        )   
 
 
     def run_montage_loader_and_create_summary(self, mrc_filepath):

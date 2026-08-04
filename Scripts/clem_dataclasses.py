@@ -203,10 +203,11 @@ class SiteDataSummary:
 
     # -------- MRC: reader builds the MRCSummary; we just assign it ---------- #
     def populate_mrc(self, mrc_reader, mrc_filepath):
-        self.mrc.load_mrc_montage(mrc_filepath) 
-        self.mrc = mrc_reader.build_montage_summary(mrc_filepath)
-        return self
-    
+        summary = mrc_reader.build_montage_summary(mrc_filepath, site_id=self.site_id)
+        label = os.path.splitext(os.path.basename(mrc_filepath))[0]
+        self.mrcs[label] = summary
+        return summary
+        
     # -------- TIFF: build the TiffSummary from the low-level loader --------- #
     def populate_tiff(self, mrc_reader, tiff_filepath):
         stack, info = mrc_reader.load_ome_tiff(tiff_filepath)

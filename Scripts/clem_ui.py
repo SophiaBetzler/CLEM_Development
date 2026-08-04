@@ -383,13 +383,7 @@ class StagePickerWindow(tk.Toplevel):
         ttk.Label(cropfov_row, text="Crop FOV (um):", style="Sm.TLabel").pack(side="left")
         self._crop_fov_var = tk.StringVar(value="2.0")
         ttk.Entry(cropfov_row, textvariable=self._crop_fov_var, width=6).pack(side="left", padx=(4, 0))
-        src_row = ttk.Frame(btn); src_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        ttk.Label(src_row, text="Coord mode", style="Sm.TLabel").pack(side="left")
-        self._shift_source_var = tk.StringVar(value="stage")
-        ttk.Radiobutton(src_row, text="stage", value="stage",
-                        variable=self._shift_source_var).pack(side="left", padx=(4, 0))
-        ttk.Radiobutton(src_row, text="image", value="image",
-                        variable=self._shift_source_var).pack(side="left", padx=(4, 0))
+
         ttk.Button(btn, text="Group picks & Export xg1", style="Accent.TButton",
                    command=self._group_and_export_xg1).grid(row=8, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         self._groups_status = tk.StringVar(value="")
@@ -398,7 +392,7 @@ class StagePickerWindow(tk.Toplevel):
 
         tf = ttk.Frame(side); tf.grid(row=3, column=0, sticky="nsew", pady=(2, 0))
         tf.rowconfigure(0, weight=1); tf.columnconfigure(0, weight=1)
-        cols = ("#", "Stage X (um)", "Stage Y (um)", "Pix X", "Pix Y")
+        cols = ("#", "Img X (px)", "Img Y (px)")
         self._tree = ttk.Treeview(tf, columns=cols, show="headings")
         for c, w in zip(cols, [26, 94, 94, 50, 50]):
             self._tree.heading(c, text=c); self._tree.column(c, width=w, anchor="center")
@@ -499,8 +493,8 @@ class StagePickerWindow(tk.Toplevel):
         self._picks.append(pick)
         self._refresh_tree(); self._redraw_points()
         self._status.set(f"Point #{len(self._picks)}\n"
-                         f"Stage X: {pick.stage_x_um:.3f} um\n"
-                         f"Stage Y: {pick.stage_y_um:.3f} um")
+                 f"Img X: {pick.image_coord_x:.0f} px\n"
+                 f"Img Y: {pick.image_coord_y:.0f} px")
 
     def _redraw_points(self):
         for a in self._pt_artists:
@@ -521,8 +515,7 @@ class StagePickerWindow(tk.Toplevel):
         self._tree.delete(*self._tree.get_children())
         for i, p in enumerate(self._picks):
             self._tree.insert("", "end", values=(
-                i + 1, f"{p.stage_x_um:.3f}", f"{p.stage_y_um:.3f}",
-                f"{p.image_coord_x:.0f}", f"{p.image_coord_y:.0f}"))
+                i + 1, f"{p.image_coord_x:.0f}", f"{p.image_coord_y:.0f}"))
         if self._picks:
             self._tree.see(self._tree.get_children()[-1])
 
@@ -564,11 +557,8 @@ class StagePickerWindow(tk.Toplevel):
         try:
             self._status.set("Grouping picks...")
             self.update_idletasks()
-            shift_source = self._shift_source_var.get()
-            self.clem_picker.set_output_coord_mode(shift_source, buffer='A')
             groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(
-                radius_um=radius_um, crop_fov=crop_fov,
-                output_folder=output_folder, shift_source=shift_source)
+            radius_um=radius_um, crop_fov=crop_fov, output_folder=output_folder)
             if not groups:
                 messagebox.showwarning("No groups", "Grouping produced no groups.", parent=self)
                 return
@@ -711,7 +701,9 @@ class RegistrationApp(tk.Tk):
 
     def _tiff_scale(self):
         t = self._resolve_latest_tiff()
-        tps = getattr(t, "pixel_spacing_um", None) if t is not None else None
+        if t is None:
+            return None
+        tps = getattr(t, "pixel_spacing_um", None) or getattr(t, "czi_pixel_spacing_um", None)
         return float(tps) if tps else None
 
     # ---------------- resolve entries from the site dataclass ----------------
@@ -750,6 +742,23 @@ class RegistrationApp(tk.Tk):
         legacy = getattr(self.site_data, "tiff", None)     # legacy fallback
         return legacy if self._tiff_has_data(legacy) else None
 
+    def _load_latest_mrc_from_folder(self):
+        folder = getattr(self.site_data, "path", None)
+        if not folder:
+            return None
+        folder = Path(folder)
+        mrcs = sorted([*folder.glob("*.mrc"), *folder.glob("*.rec")],
+                    key=lambda p: p.stat().st_mtime)
+        if not mrcs:
+            return None
+        try:
+            return self.mrc_reader.load_mrc_into_data_class(
+                site_data=self.site_data, mrc_path=str(mrcs[-1]))
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.status_var.set(f"Could not load MRC from folder: {e}")
+            return None
+
     def _load_latest_tiff_from_folder(self):
         """tif AND czi both empty in the dataclass: pull the newest LM file
         from the site folder into the dataclass (via the reader) and return
@@ -781,9 +790,10 @@ class RegistrationApp(tk.Tk):
         """Persist the current flip toggles onto the displayed (latest) MRC
         dataclass, read directly from the site data."""
         mrc_dc = self._resolve_latest_mrc()
+        if mrc_dc is None:
+            mrc_dc = self._load_latest_mrc_from_folder()
         if mrc_dc is not None:
-            mrc_dc.flip_x = bool(self.flip_x.get())
-            mrc_dc.flip_y = bool(self.flip_y.get())
+            self._display_loaded_mrc_data(mrc_dc)
 
     def _get_tiff_slice(self, c, z):
         """DISPLAY slice: flipped per the X and Y checkboxes."""
@@ -1016,13 +1026,13 @@ class RegistrationApp(tk.Tk):
         if not path:
             return
         try:
-            self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
+            #self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
             mrc_dc = self._resolve_latest_mrc()
             if mrc_dc is None:
                 raise RuntimeError("MRC was not stored in site_data.mrcs.")
             self._display_loaded_mrc_data(mrc_dc)
             if getattr(mrc_dc, "mrc_path", None):
-                self.tem.load_mrc_in_nav(mrc_dc.mrc_path)
+                self.tem.load_mrc_in_nav(mrc_dataclass=mrc_dc, buffer='S')
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -1057,7 +1067,7 @@ class RegistrationApp(tk.Tk):
         self._display_loaded_site_data()
         mrc_dc = self._resolve_latest_mrc()
         if mrc_dc is not None and getattr(mrc_dc, "mrc_path", None):
-            self.tem.load_mrc_in_nav(mrc_dc.mrc_path)
+            self.tem.load_mrc_in_nav(mrc_dataclass=mrc_dc, buffer='S')
         # Startup auto re-apply if a stored transform exists for this site.
         record = None
         finder = getattr(self.mrc_reader, "_find_latest_transform", None)
@@ -1390,12 +1400,10 @@ class RegistrationApp(tk.Tk):
                 mrc_summary.flip_y = MRCReader.MONTAGE_FLIP_Y
             except Exception:
                 pass
-            site_data = SiteDataSummary(
-                site_id=self.site_data.site_id, path=self.site_data.path,
-                mrc=mrc_summary, tiff=self.site_data.tiff,
-                registration=self.site_data.registration, picks=self.site_data.picks)
-            clem_picker = CLEMPicker(site_data, TEMComm(offline=True, path=self.mrc_reader.output_root,
-                                                        mrc_reader=self.mrc_reader))
+            mrc_summary = self._resolve_latest_mrc() or self.mrc_reader.build_montage_summary(self.mrc_file_path)
+            mrc_summary.flip_x = MRCReader.MONTAGE_FLIP_X
+            mrc_summary.flip_y = MRCReader.MONTAGE_FLIP_Y
+            clem_picker = CLEMPicker(mrc_summary, self.tem)
 
             names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)] for i in range(len(self.warped_channels))]
             n_z = self.site_data.tiff.num_z_slices if self.site_data.tiff is not None else 1
@@ -1469,4 +1477,28 @@ class RegistrationApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    RegistrationApp().mainloop()
+    import argparse
+    parser = argparse.ArgumentParser(description="Launch the CLEM UI standalone (offline).")
+    parser.add_argument("site_folder", nargs="?",
+                        help="Site folder (MRC/mdoc, TIFF/CZI). Omit to open a chooser.")
+    parser.add_argument("--coord-key", default="AlignedPieceCoordsVS")
+    parser.add_argument("--milling-angle", type=float, default=0.0)
+    args = parser.parse_args()
+
+    site_folder = args.site_folder
+    if not site_folder:
+        _root = tk.Tk(); _root.withdraw()
+        site_folder = filedialog.askdirectory(title="Choose a site folder")
+        _root.destroy()
+    if not site_folder:
+        raise SystemExit("No site folder selected.")
+
+    site_folder = os.path.normpath(site_folder)
+    experiment_root = os.path.dirname(site_folder) or site_folder
+
+    mrc_reader = MRCReader(coord_key=args.coord_key, section=0)
+    tem = TEMComm(path=experiment_root, mrc_reader=mrc_reader, offline=True)
+    site_data = SiteDataSummary(site_id=os.path.basename(site_folder),
+                                path=site_folder, milling_angle=args.milling_angle)
+    RegistrationApp(mrc_reader=mrc_reader, site_data=site_data,
+                    tem_communication=tem).mainloop()

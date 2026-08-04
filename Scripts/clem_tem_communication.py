@@ -47,20 +47,21 @@ class TEMComm:
 
     def add_nav_point(self, mrc_dataclass, buffer="S"):
         self.set_montage_to_buffer(note=mrc_dataclass.montage_id, buffer=buffer)
+        stage_z = mrc_dataclass.stage_z_um if mrc_dataclass.stage_z_um is not None else 0.0
         if len(mrc_dataclass.groups) == 0 and len(mrc_dataclass.picks) != 0:
             for pick in mrc_dataclass.picks[:-1]:
                 idx = []
-                idx = sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, mrc_dataclass.stage_z_um, 0, 1)
+                idx = int(sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, stage_z, 0, 1))
                 sem.ChangeItemNote(idx, pick.pick_id)
-            idx = sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, mrc_dataclass.stage_z_um, 0, 0)
+            idx = int(sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, stage_z, 0, 0))
             sem.ChangeItemNote(idx, mrc_dataclass.picks[-1].pick_id)
         elif len(mrc_dataclass.groups) != 0:
             for group in mrc_dataclass.groups:
                 for pick in mrc_dataclass.picks[:-1]:
                     idx = []
-                    idx = sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, group.group_id, 1)
+                    idx = int(sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, group.group_id, 1))
                     sem.ChangeItemNote(idx, pick.pick_id)
-                idx = sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, mrc_dataclass.stage_z_um, group.group_id, 0)
+                idx = int(sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, stage_z, group.group_id, 0))
                 sem.ChangeItemNote(idx, mrc_dataclass.picks[-1].pick_id)
         elif len(mrc_dataclass.groups) == 0 and len(mrc_dataclass.picks) == 0:
             raise ValueError(f"No picks exists for this montage {mrc_dataclass.montage_id}.")
@@ -68,33 +69,34 @@ class TEMComm:
             return
 
     def load_mrc_in_nav(self, site_data=None, mrc_dataclass=None, buffer=None):
-
         if mrc_dataclass is None:
             mrc_dataclass = self.mrc_reader.identify_latest_montage_file(site_data)
-                
-        if mrc_dataclass.mrc_path.lower().endswith(".mdoc"):
-            mrc_path = mrc_path[:-len(".mdoc")]
-        else: 
-            mrc_path = mrc_dataclass.mrc_path.lower()
 
-        if sem.ReportIfNavOpen() == 0: self._create_nav_file()
+        mrc_path = mrc_dataclass.mrc_path
+        if mrc_path.lower().endswith(".mdoc"):
+            mrc_path = mrc_path[:-len(".mdoc")]      # strip trailing .mdoc, keep real path/case
 
-        idx =int(sem.NavIndexWithNote(mrc_dataclass.montage_id))
+        if buffer is None:
+            buffer = "A"
 
-        if buffer is None: buffer = 'A'
-        if idx > 0:
-            sem.LoadOtherMap(idx, buffer)
-        else:
-            while sem.ReportFileNumber() > 0:
-                sem.CloseFile()
-            try:
-                sem.OpenOldFile(mrc_path)
+        try:
+            if sem.ReportIfNavOpen() == 0:
+                self.create_nav_file()               # was self._create_nav_file()
+
+            idx = int(sem.NavIndexWithNote(mrc_dataclass.montage_id))
+            if idx > 0:
+                sem.LoadOtherMap(idx, buffer)        # already in the navigator
+            else:
+                while sem.ReportFileNumber() > 0:
+                    sem.CloseFile()
+                sem.OpenOldFile(mrc_path)            # not in nav -> open the montage file
                 sem.ReadFile(0)
                 sem.NewMap(0, mrc_dataclass.montage_id)
-                if buffer != "A": sem.Copy("A", buffer)
-            except Exception as e:
-                print(f"{e}")
-        
+                if buffer != "A":
+                    sem.Copy("A", buffer)
+        except Exception as e:
+            print(f"[WARN] load_mrc_in_nav ({'offline' if self.offline else 'live'}): {e}")
+
     def save_buffer_image(self, site_data, label=None):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()

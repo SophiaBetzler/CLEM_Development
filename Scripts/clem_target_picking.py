@@ -3,6 +3,7 @@
 # ============================================================================
 # Comprehensive implementation with all utilities and workflow methods
 
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import mrcfile
@@ -25,8 +26,9 @@ class CLEMPicker:
         self.coord_field = self.mrc_dataclass.coord_field
         self.nav_map_buffer = "S"
 
-        self.site_id = self.mrc_dataclass.mrc_path.parent.name
-        self.site_output_root = self.mrc_dataclass.mrc_path.parent
+        p = Path(self.mrc_dataclass.mrc_path)
+        self.site_id = p.parent.name
+        self.site_output_root = p.parent
         self.tem = tem_communication
         self.mrc_reader = self.tem.mrc_reader
       
@@ -66,8 +68,8 @@ class CLEMPicker:
         self.mrc_dataclass.picks.append(pick)
         return pick
 
-    def add_pick_from_display(self, dx: float, dy: float, pick_id: Optional[str] = None) -> Pick:     
-        px, py = self.convert_display_to_montage_orientation(dx, dy)
+    def add_pick_from_display(self, px: float, py: float, pick_id: Optional[str] = None) -> Pick:     
+        #px, py = self.convert_display_to_montage_orientation(dx, dy)
         return self.add_pick_from_pixel(px, py, pick_id=pick_id)
 
     def remove_last_pick(self) -> Optional[Pick]:
@@ -351,10 +353,11 @@ class CLEMPicker:
         for group in groups:
             # if not self.tem.offline:                        # refine needs the scope
             #     self.refine_target_stage_position(target_pick=group.tracking)
-            self.calculate_image_shifts_for_group(group, source=shift_source)
-            ref_crops = self.mrc_reader.write_mrc_crops(site_data=self.site_data, fov_um=crop_fov, skip_pick_id=group.tracking.pick_id, )
+            #self.calculate_image_shifts_for_group(group, source=shift_source)
+            ref_crops = self.mrc_reader.write_mrc_crops(mrc_dataclass=self.mrc_dataclass, fov_um=crop_fov,
+                    pixel_spacing_um=self.mrc_dataclass.pixel_spacing_um, output_root=os.path.join(str(self.site_output_root), "picks", "crop"), skip_pick_id=group.tracking.pick_id)
             
-            nav_indices = self.add_group_to_navigator(group)
-            xg1_files.append(self.generate_xg1_file(group, output_folder))
+            nav_indices = self.add_picks_to_navigator(self.mrc_dataclass, buffer=self.nav_map_buffer)
+            #xg1_files.append(self.generate_xg1_file(group, output_folder))
 
         return groups, xg1_files
