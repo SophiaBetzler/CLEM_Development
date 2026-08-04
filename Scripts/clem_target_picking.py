@@ -340,7 +340,8 @@ class CLEMPicker:
     # Run paceTomo target/group generation for all picks/groups
     # ════════════════════════════════════════════════════════════════════════
     
-    def run_create_groups_for_pacetomo(self, radius_um=7.5, crop_fov=2.0, output_folder=None, shift_source='image'):
+    def run_create_groups_for_pacetomo(self, radius_um, crop_fov, output_folder=None,
+                                   warp_slice=None, n_channels=0, n_z=1):
 
         if output_folder is None:
             output_folder = self.site_output_root          # was self.site_output.root
@@ -358,6 +359,11 @@ class CLEMPicker:
                     pixel_spacing_um=self.mrc_dataclass.pixel_spacing_um, output_root=os.path.join(str(self.site_output_root), "picks", "crop"), skip_pick_id=group.tracking.pick_id)
             
             nav_indices = self.add_picks_to_navigator(self.mrc_dataclass, buffer=self.nav_map_buffer)
-            #xg1_files.append(self.generate_xg1_file(group, output_folder))
+            ref_crops = self.mrc_reader.write_mrc_crops(
+                                                    mrc_dataclass=self.mrc_dataclass, fov_um=crop_fov,
+                                                    pixel_spacing_um=self.mrc_dataclass.pixel_spacing_um,
+                                                    output_root=os.path.join(str(self.site_output_root), "picks", "target_overlays"),
+                                                    skip_pick_id=group.tracking.pick_id)
+        #xg1_files.append(self.generate_xg1_file(group, output_folder))
 
         return groups, xg1_files

@@ -532,9 +532,10 @@ class MRCReader:
         for pick in mrc_dataclass.picks:
             if skip_pick_id is not None and pick.pick_id == skip_pick_id:
                 written.append(None); continue
+            H, W = mrc_dataclass.image.shape[:2]
             px, py = pick.image_coord_x, pick.image_coord_y
-            if mrc_dataclass.flip_x: px = mrc_dataclass.image_width  - 1 - px
-            if mrc_dataclass.flip_y: py = mrc_dataclass.image_height - 1 - py
+            if mrc_dataclass.flip_x: px = W - 1 - px
+            if mrc_dataclass.flip_y: py = H - 1 - py
             crop = self._crop_centered_at_pixel_coord(mrc_dataclass.image, px, py, pixel_spacing_um, fov_um)
             crop = correct_image(crop)
             out = f"{output_root}_{label}_{pick.pick_id}.mrc"
@@ -551,8 +552,9 @@ class MRCReader:
         picks = mrc_dataclass.picks
         stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), np.float32) for _ in picks]
         def to_true(px, py):
-            if mrc_dataclass.flip_x: px = mrc_dataclass.image_width  - 1 - px
-            if mrc_dataclass.flip_y: py = mrc_dataclass.image_height - 1 - py
+            H, W = mrc_dataclass.image.shape[:2]
+            if mrc_dataclass.flip_x: px = W - 1 - px
+            if mrc_dataclass.flip_y: py = H - 1 - py
             return px, py
         for pi, pick in enumerate(picks):                 # channel 0 = TEM montage
             px, py = to_true(pick.image_coord_x, pick.image_coord_y)

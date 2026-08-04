@@ -554,7 +554,9 @@ class StagePickerWindow(tk.Toplevel):
             self._status.set("Grouping picks...")
             self.update_idletasks()
             groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(
-            radius_um=radius_um, crop_fov=crop_fov, output_folder=output_folder)
+                                                    radius_um=radius_um, crop_fov=crop_fov, output_folder=output_folder,
+                                                    warp_slice=self._warp_slice_true,
+                                                    n_channels=len(self._chan_true), n_z=self._n_z)
             if not groups:
                 messagebox.showwarning("No groups", "Grouping produced no groups.", parent=self)
                 return
