@@ -196,7 +196,7 @@ class SiteDataSummary:
     stage_position_high_mag: list = field(default_factory=list)
     mrcs: dict[str, MRCSummary] = field(default_factory=dict)
     images: dict[str, ImageSummary] = field(default_factory=dict)
-    tiffs: dict[str, TiffSummary] = field(default_factory=dict)
+    tiff: Optional[TiffSummary] = None
     transforms: dict[str, TransformRecord] = field(default_factory=dict)
     registration: Optional[RegistrationSummary] = None
     

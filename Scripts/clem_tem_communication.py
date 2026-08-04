@@ -315,8 +315,9 @@ class TEMComm:
     # ---------------------------------------------------------------------------
     
     def acquire_montage_at_nav_item(self, site_data, nav_idx, fov_um_x, fov_um_y, mode='Search', imaging_state=None, eucentricity=False, label=None):
-        sem.MoveToNavItem(nav_idx)
-        sem.Delay(2, 'sec')
+        if self.offline is False:
+            sem.MoveToNavItem(nav_idx)
+            sem.Delay(2, 'sec')
         self.acquire_montage(site_data=site_data, mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, imaging_state=imaging_state, eucentricity=eucentricity, label=label)
 
 

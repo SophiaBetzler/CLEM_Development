@@ -34,6 +34,7 @@ Dependencies:  pip install mrcfile tifffile scikit-image matplotlib numpy
 
 import sys
 import os
+from pathlib import Path
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -76,39 +77,23 @@ CHANNEL_COLOR_NAMES = ["green", "magenta", "cyan", "yellow", "orange", "purple"]
 PT_MRC = "#FF4444"; PT_TIFF = "#44AAFF"
 ZOOM_FACTOR = 1.25
 
-# Fixed MRC (montage) display flip.  These describe how the true montage is
-# shown, and they are also the flags the stage picker uses to convert its
-# display clicks back to true montage pixels.
-MONTAGE_FLIP_X = False
-MONTAGE_FLIP_Y = True
+# The montage display-flip convention (and the flip function itself) live on
+# MRCReader; the UI sources them from there rather than re-declaring them.
 
 # TIFF display flip defaults (the checkboxes).  Y on, X off, by request.
 TIFF_FLIP_X_DEFAULT = False
 TIFF_FLIP_Y_DEFAULT = True
 
 
-def _flip2d(arr, flip_x, flip_y):
-    if flip_x:
-        arr = np.fliplr(arr)
-    if flip_y:
-        arr = np.flipud(arr)
-    return arr
-
 def _mrc_to_display(arr):
-    """True montage array -> displayed array (2-D or (H,W,3/4))."""
-    return _flip2d(arr, MONTAGE_FLIP_X, MONTAGE_FLIP_Y)
+    """True montage array -> displayed array (2-D or (H,W,3/4)), using the
+    reader's flip convention."""
+    return MRCReader._flip_for_display(arr, MRCReader.MONTAGE_FLIP_X, MRCReader.MONTAGE_FLIP_Y)
 
 def _mrc_display_to_true_2d(arr):
     """Displayed montage array -> true-frame array (self-inverse)."""
-    return _flip2d(arr, MONTAGE_FLIP_X, MONTAGE_FLIP_Y)
+    return MRCReader._flip_for_display(arr, MRCReader.MONTAGE_FLIP_X, MRCReader.MONTAGE_FLIP_Y)
 
-def _mrc_disp_pixel_to_true(dx, dy, w, h):
-    tx = (w - 1 - dx) if MONTAGE_FLIP_X else dx
-    ty = (h - 1 - dy) if MONTAGE_FLIP_Y else dy
-    return tx, ty
-
-def _mrc_true_pixel_to_disp(x, y, w, h):
-    return _mrc_disp_pixel_to_true(x, y, w, h)   # involution
 
 
 # ---------------------------------------------------------------------------
@@ -186,13 +171,11 @@ class PanZoomHandler:
 
 
 # ---------------------------------------------------------------------------
-# Image helpers
+# Display-only rendering helpers (brightness/contrast, overlay compositing,
+# and view downsampling).  Kept in the UI because they exist purely to paint
+# pixels on screen and depend on UI state (BC controls, CHANNEL_COLORS).
+# Image normalization and MRC reading live on MRCReader.
 # ---------------------------------------------------------------------------
-
-def normalize_image(img):
-    img = np.nan_to_num(img.astype(np.float32))
-    lo, hi = img.min(), img.max()
-    return (img - lo) / (hi - lo) if hi > lo else np.zeros_like(img)
 
 def apply_bc(img, vmin, vmax):
     if vmax <= vmin:
@@ -219,17 +202,6 @@ def _fast_ds(arr, max_px=2048):
     if f == 1:
         return arr
     return arr[::f, ::f] if arr.ndim == 2 else arr[::f, ::f, :]
-
-
-def load_mrc_single(path):
-    with mrcfile.open(path, mode="r", permissive=True) as mrc:
-        data = mrc.data.copy()
-        info = f"shape={data.shape}  voxel={mrc.voxel_size}"
-    if data.ndim == 3:
-        data = data[data.shape[0] // 2]; info += "  (mid z)"
-    elif data.ndim != 2:
-        raise ValueError(f"Unsupported MRC ndim={data.ndim}")
-    return normalize_image(data), info
 
 
 # ---------------------------------------------------------------------------
@@ -484,8 +456,8 @@ class StagePickerWindow(tk.Toplevel):
         if len(cols) == 0 or len(rows) == 0:
             return
         # display column/row -> true montage index (montage flip)
-        tcols = (self._W - 1 - cols) if MONTAGE_FLIP_X else cols
-        trows = (self._H - 1 - rows) if MONTAGE_FLIP_Y else rows
+        tcols = (self._W - 1 - cols) if MRCReader.MONTAGE_FLIP_X else cols
+        trows = (self._H - 1 - rows) if MRCReader.MONTAGE_FLIP_Y else rows
         rr = np.ix_(trows, tcols); shape = (len(rows), len(cols))
         if self._tem_on.get():
             base = apply_bc(self._mrc_true[rr].astype(np.float32),
@@ -536,7 +508,8 @@ class StagePickerWindow(tk.Toplevel):
             except Exception: pass
         self._pt_artists = []
         for i, pick in enumerate(self._picks):
-            x, y = _mrc_true_pixel_to_disp(pick.pixel_x_um, pick.pixel_y_um, self._W, self._H)
+            x, y = self.clem_picker.convert_montage_to_display_orientation(
+                pick.image_coord_x, pick.image_coord_y)
             dot, = self._ax.plot(x, y, "o", color=CYA, markersize=6,
                                  markeredgecolor="white", markeredgewidth=0.8, zorder=6)
             txt = self._ax.text(x + 9, y - 9, str(i + 1), color=CYA,
@@ -549,7 +522,7 @@ class StagePickerWindow(tk.Toplevel):
         for i, p in enumerate(self._picks):
             self._tree.insert("", "end", values=(
                 i + 1, f"{p.stage_x_um:.3f}", f"{p.stage_y_um:.3f}",
-                f"{p.pixel_x_um:.0f}", f"{p.pixel_y_um:.0f}"))
+                f"{p.image_coord_x:.0f}", f"{p.image_coord_y:.0f}"))
         if self._picks:
             self._tree.see(self._tree.get_children()[-1])
 
@@ -626,7 +599,8 @@ class StagePickerWindow(tk.Toplevel):
         for i, group in enumerate(groups):
             color = colors[i % len(colors)]
             for pick in group.picks:
-                dx, dy = _mrc_true_pixel_to_disp(pick.pixel_x_um, pick.pixel_y_um, self._W, self._H)
+                dx, dy = self.clem_picker.convert_montage_to_display_orientation(
+                    pick.image_coord_x, pick.image_coord_y)
                 c = self._ax.plot(dx, dy, "o", markersize=20, markerfacecolor="none",
                                   markeredgecolor=color, markeredgewidth=2, zorder=4)
                 self._group_artists.extend(c)
@@ -634,7 +608,8 @@ class StagePickerWindow(tk.Toplevel):
                                   fontsize=8, fontweight="bold", zorder=5)
                 self._group_artists.append(t)
             tgt = group.tracking
-            dx, dy = _mrc_true_pixel_to_disp(tgt.pixel_x_um, tgt.pixel_y_um, self._W, self._H)
+            dx, dy = self.clem_picker.convert_montage_to_display_orientation(
+                tgt.image_coord_x, tgt.image_coord_y)
             star = self._ax.plot(dx, dy, "*", markersize=15, markerfacecolor=color,
                                  markeredgecolor="white", markeredgewidth=1, zorder=6)
             self._group_artists.extend(star)
@@ -659,10 +634,7 @@ class StagePickerWindow(tk.Toplevel):
         if not path:
             return
         try:
-            with open(path, "w") as fh:
-                for i, p in enumerate(self._picks):
-                    fh.write(f"{i+1}\t{p.stage_x_um:.4f}\t{p.stage_y_um:.4f}\t"
-                             f"{p.pixel_x_um:.1f}\t{p.pixel_y_um:.1f}\n")
+            self.clem_picker.export_stage_positions(self._picks, path)
             root, _ = os.path.splitext(path)
             self._fig.savefig(root + "_screenshot.png", dpi=150,
                               facecolor=self._fig.get_facecolor(), bbox_inches="tight")
@@ -738,22 +710,100 @@ class RegistrationApp(tk.Tk):
     # ---------------- helpers ----------------
 
     def _tiff_scale(self):
-        tps = getattr(self.site_data.tiff, "pixel_spacing_um", None) if self.site_data.tiff else None
+        t = self._resolve_latest_tiff()
+        tps = getattr(t, "pixel_spacing_um", None) if t is not None else None
         return float(tps) if tps else None
+
+    # ---------------- resolve entries from the site dataclass ----------------
+
+    def _resolve_latest_mrc(self):
+        """Latest MRCSummary held in the site's mrc dictionary.  Prefers the
+        reader's finder, then the newest entry in site_data.mrcs, then any
+        legacy single-mrc attribute."""
+        finder = getattr(self.mrc_reader, "_find_latest_mrc_dataclass", None)
+        if callable(finder):
+            try:
+                m = finder(self.site_data)
+                if m is not None:
+                    return m
+            except Exception:
+                pass
+        mrcs = getattr(self.site_data, "mrcs", None) or {}
+        candidates = [m for m in mrcs.values() if m is not None]
+        if candidates:
+            return max(candidates, key=lambda m: getattr(m, "timestamp", None) or "")
+        return getattr(self.site_data, "mrc", None)   # legacy fallback
+
+    @staticmethod
+    def _tiff_has_data(t):
+        return t is not None and (getattr(t, "stack_czyx", None) is not None
+                                  or getattr(t, "czi_overview", None) is not None)
+
+    def _resolve_latest_tiff(self):
+        """Latest TiffSummary that actually carries image data (tif stack or
+        czi overview) from the site's tiff dictionary; None if tif AND czi are
+        both empty."""
+        tiffs = getattr(self.site_data, "tiffs", None) or {}
+        candidates = [t for t in tiffs.values() if self._tiff_has_data(t)]
+        if candidates:
+            return candidates[-1]
+        legacy = getattr(self.site_data, "tiff", None)     # legacy fallback
+        return legacy if self._tiff_has_data(legacy) else None
+
+    def _load_latest_tiff_from_folder(self):
+        """tif AND czi both empty in the dataclass: pull the newest LM file
+        from the site folder into the dataclass (via the reader) and return
+        the resulting TiffSummary."""
+        folder = getattr(self.site_data, "path", None)
+        if not folder:
+            return None
+        folder = Path(folder)
+        ome = sorted([*folder.glob("*.ome.tif"), *folder.glob("*.ome.tiff"),
+                      *folder.glob("*.tif"), *folder.glob("*.tiff")],
+                     key=lambda p: p.stat().st_mtime)
+        czi = sorted(folder.glob("*.czi"), key=lambda p: p.stat().st_mtime)
+        try:
+            if ome:
+                self.mrc_reader.load_tiff_into_data_class(site_data=self.site_data,
+                                                          ome_path=str(ome[-1]))
+            elif czi:
+                self.mrc_reader.load_czi_into_data_class(site_data=self.site_data,
+                                                         czi_path=str(czi[-1]))
+            else:
+                return None
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.status_var.set(f"Could not load LM image from folder: {e}")
+            return None
+        return self._resolve_latest_tiff()
+
+    def _sync_flip_to_mrc(self):
+        """Persist the current flip toggles onto the displayed (latest) MRC
+        dataclass, read directly from the site data."""
+        mrc_dc = self._resolve_latest_mrc()
+        if mrc_dc is not None:
+            mrc_dc.flip_x = bool(self.flip_x.get())
+            mrc_dc.flip_y = bool(self.flip_y.get())
 
     def _get_tiff_slice(self, c, z):
         """DISPLAY slice: flipped per the X and Y checkboxes."""
-        return _flip2d(self.tiff_stack[c, z], self.flip_x.get(), self.flip_y.get())
+        return MRCReader._flip_for_display(self.tiff_stack[c, z], self.flip_x.get(), self.flip_y.get())
 
     # ---------------- display of stored site data ----------------
 
     def _display_loaded_site_data(self):
-        if self.site_data.mrc is not None:
-            self._display_loaded_mrc_data(self.site_data.mrc)
-        t = self.site_data.tiff
-        if t is not None and (getattr(t, "stack_czyx", None) is not None
-                              or getattr(t, "czi_overview", None) is not None):
-            self._display_loaded_tiff_data(t)
+        # MRC: newest entry from the site's mrc dictionary.
+        mrc_dc = self._resolve_latest_mrc()
+        if mrc_dc is not None:
+            self._display_loaded_mrc_data(mrc_dc)
+
+        # TIFF / CZI: from the dataclass; if tif AND czi are both empty, pull
+        # the newest LM file from the site folder into the dataclass.
+        tiff_dc = self._resolve_latest_tiff()
+        if tiff_dc is None:
+            tiff_dc = self._load_latest_tiff_from_folder()
+        if tiff_dc is not None:
+            self._display_loaded_tiff_data(tiff_dc)
 
     def _display_loaded_mrc_data(self, data):
         self.mrc_file_path = os.fspath(data.mrc_path)
@@ -786,6 +836,7 @@ class RegistrationApp(tk.Tk):
         self.channel_spin.config(to=max(0, C - 1)); self.channel_var.set(0)
         self.z_spin.config(to=max(0, Z - 1)); self.z_var.set(0)
         self.flip_x.set(TIFF_FLIP_X_DEFAULT); self.flip_y.set(TIFF_FLIP_Y_DEFAULT)
+        self._sync_flip_to_mrc()
         self.bc_tiff_panel.build(C, self._on_bc_tiff)
         src_path = getattr(data, "ome_path", None) or getattr(data, "czi_path", None)
         label = os.path.basename(os.fspath(src_path)) if src_path else "image"
@@ -815,7 +866,6 @@ class RegistrationApp(tk.Tk):
     def _build_ui(self):
         PAD = 8
         top = ttk.Frame(self, padding=(PAD, PAD, PAD, 0)); top.pack(fill="x")
-        ttk.Button(top, text="Load MRC", command=self._load_mrc).pack(side="left", padx=3)
         ttk.Button(top, text="Load MRC + mdoc", style="Mont.TButton",
                    command=self._load_mrc_mdoc).pack(side="left", padx=3)
         self.mrc_info_var = tk.StringVar(value="No MRC loaded")
@@ -960,24 +1010,6 @@ class RegistrationApp(tk.Tk):
 
     # ---------------- loading ----------------
 
-    def _load_mrc(self):
-        path = filedialog.askopenfilename(title="Open MRC",
-            filetypes=[("MRC", ("*.mrc", "*.rec", "*.mrcs", "*.map")), ("All files", "*")])
-        if not path:
-            return
-        try:
-            img, info = load_mrc_single(path)
-            self.mrc_image = img; self._mrc_img_dirty = True
-            self.mrc_is_montage = False; self.mrc_montage_cache.clear()
-            self.mrc_current_pieces = []; self.mrc_pixel_spacing_um = 1.0
-            self.bc_mrc.reset(); self.mrc_info_var.set(os.path.basename(path) + "  " + info)
-            self.mrc_nav_frame.grid_remove()
-            self._draw_mrc()
-            self.tem.load_mrc_in_nav(path)
-            self.status_var.set("MRC loaded.")
-        except Exception as e:
-            messagebox.showerror("MRC load error", str(e))
-
     def _load_mrc_mdoc(self):
         path = filedialog.askopenfilename(title="Open MRC montage",
             filetypes=[("MRC", ("*.mrc", "*.rec", "*.mrcs", "*.map")), ("All files", "*")])
@@ -985,8 +1017,12 @@ class RegistrationApp(tk.Tk):
             return
         try:
             self.mrc_reader.load_mrc_into_data_class(site_data=self.site_data, mrc_path=path)
-            self._display_loaded_mrc_data(self.site_data.mrc)
-            self.tem.load_mrc_in_nav(self.site_data.mrc.mrc_path)
+            mrc_dc = self._resolve_latest_mrc()
+            if mrc_dc is None:
+                raise RuntimeError("MRC was not stored in site_data.mrcs.")
+            self._display_loaded_mrc_data(mrc_dc)
+            if getattr(mrc_dc, "mrc_path", None):
+                self.tem.load_mrc_in_nav(mrc_dc.mrc_path)
             self.status_var.set("MRC montage loaded.")
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -1008,17 +1044,20 @@ class RegistrationApp(tk.Tk):
             for cb in (getattr(self, "flip_x_cb", None), getattr(self, "flip_y_cb", None)):
                 if cb is not None:
                     cb.config(state="normal")
-            self._display_loaded_tiff_data(self.site_data.tiff)
+            tiff_dc = self._resolve_latest_tiff()
+            if tiff_dc is not None:
+                self._display_loaded_tiff_data(tiff_dc)
             self.status_var.set("Image loaded. Flip to match the MRC, then pick landmarks.")
         except Exception as e:
             import traceback; traceback.print_exc()
             messagebox.showerror("TIFF load error", str(e))
 
     def _load_site_data(self):
-        self.site_data = self.mrc_reader.load_latest_from_site(self.site_id)
+        # Everything is read from the site dataclass that was handed to the app.
         self._display_loaded_site_data()
-        if self.site_data.mrc is not None:
-            self.tem.load_mrc_in_nav(self.site_data.mrc.mrc_path)
+        mrc_dc = self._resolve_latest_mrc()
+        if mrc_dc is not None and getattr(mrc_dc, "mrc_path", None):
+            self.tem.load_mrc_in_nav(mrc_dc.mrc_path)
         # Startup auto re-apply if a stored transform exists for this site.
         record = None
         finder = getattr(self.mrc_reader, "_find_latest_transform", None)
@@ -1031,6 +1070,7 @@ class RegistrationApp(tk.Tk):
             self._loaded_record = record
             self.flip_x.set(bool(record.flip_x))
             self.flip_y.set(bool(record.flip_y))
+            self._sync_flip_to_mrc()
             for cb in (getattr(self, "flip_x_cb", None), getattr(self, "flip_y_cb", None)):
                 if cb is not None:
                     cb.config(state="disabled")   # 2nd fit reuses the 1st fit's orientation
@@ -1056,19 +1096,13 @@ class RegistrationApp(tk.Tk):
         if sec_idx in self.mrc_montage_cache:
             return self.mrc_montage_cache[sec_idx]
         pieces = self.mrc_section_map[sec_idx]
-        img_h, img_w = self.mrc_img_hw
 
         def status_cb(msg):
             self.status_var.set(msg); self.update_idletasks()
 
-        reader = MRCReader(coord_key=self.mrc_reader.coord_key, path=self.mrc_reader.output_root,
-                           refine_alignment=self.mrc_reader.refine_alignment, section=sec_idx)
-        for attr in ("section_pieces", "_global_info", "pixel_spacing_um", "_img_hw",
-                     "_feather_px", "mrc_image", "montages"):
-            if hasattr(self.mrc_reader, attr):
-                setattr(reader, attr, getattr(self.mrc_reader, attr))
-        mont = reader._assemble_montage(self.mrc_file_path, img_h, img_w, self.mrc_feather_px,
-                                        self.mrc_reader.coord_key, pieces=pieces, status_cb=status_cb)
+        mont = self.mrc_reader.assemble_section(
+            self.mrc_file_path, self.mrc_img_hw, self.mrc_feather_px,
+            pieces=pieces, status_cb=status_cb)
         self.mrc_montage_cache[sec_idx] = mont
         return mont
 
@@ -1199,6 +1233,8 @@ class RegistrationApp(tk.Tk):
         self.status_var.set("Points cleared.")
 
     def _on_flip_changed(self):
+        # Persist the toggle state onto the displayed MRC dataclass.
+        self._sync_flip_to_mrc()
         # Picks are stored in the display frame, so a flip change invalidates
         # them.  Clear pairs and any applied transform; re-pick after orienting.
         if self.point_pairs or self.warped_channels:
@@ -1350,8 +1386,8 @@ class RegistrationApp(tk.Tk):
             mrc_summary = self.mrc_reader.build_montage_summary(self.mrc_file_path)
             # tell the picker how the montage is displayed so its display<->true works
             try:
-                mrc_summary.flip_x = MONTAGE_FLIP_X
-                mrc_summary.flip_y = MONTAGE_FLIP_Y
+                mrc_summary.flip_x = MRCReader.MONTAGE_FLIP_X
+                mrc_summary.flip_y = MRCReader.MONTAGE_FLIP_Y
             except Exception:
                 pass
             site_data = SiteDataSummary(

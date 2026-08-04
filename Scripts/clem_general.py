@@ -132,14 +132,12 @@ class ExecutiveControls:
         for site_id, site_data in self.site_collection.sites.items():
             self.tem.precise_stage_move(stage_x_um = site_data.stage_position[0], stage_y_um = site_data.stage_position[1], stage_z_um = site_data.stage_position[2])
             nav_idx = self.tem.find_nav_item_with_note(f"{site_id}_overview")
-            if self.sample_type == 'airyscan':
-                self.tem.acquire_montage_at_nav_item(site_data=site_data, mode='View', nav_idx=nav_idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], eucentricity=True) 
-            elif self.sample_type == 'lamella':
-                _, montage_path = self.tem.acquire_montage_at_nav_item(mode='Search', nav_idx=nav_idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], eucentricity=True)
-                self.mrc.load_mrc_montage(montage_path) 
-                site_data.mrc = self.mrc.build_montage_summary(montage_path)    
-            site_data.save()
-            
+            if self.tem.offline is False:
+                if self.sample_type == 'airyscan':
+                    self.tem.acquire_montage_at_nav_item(site_data=site_data, mode='View', nav_idx=nav_idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], eucentricity=True) 
+                elif self.sample_type == 'lamella':
+                    self.tem.acquire_montage_at_nav_item(mode='Search', nav_idx=nav_idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], eucentricity=True) 
+                site_data.save()
 
     def register_site_data(self, site_data, active=True):
         if self.site_collection is not None:
@@ -153,37 +151,15 @@ class ExecutiveControls:
     def run_clem_alignment(self):
         from clem_ui import RegistrationApp   
         from clem_dataclasses import SiteDataSummary
-        tem_stage_positions = self._import_csv_file('tem_stage_positions_refined.csv')
-        seen = set()
-        for site in tem_stage_positions:
-            site_id = site["name"]
-            if site_id in seen:
-                raise ValueError(f"Dublicate site_id {site_id!r} in CSV file.")
-            seen.add(site_id)
-            site_data = SiteDataSummary(site_id=site_id, path=os.path.join(self.mrc.output_root, site_id))
-            site_data.set_acquisition_from_csv_row(site)
-            print(site_data.path)
-            nav_idx = self.tem.find_nav_item_with_note(Path(site_data.mrc.path).stem)
-            self.tem.find_buffer_of_montage(idx=nav_idx, buffer="A")
-            self.register_site_data(site_data, active=True)
-            ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data, tem_communication=self.tem)
+        for site_id, site_data in self.site_collection.sites.items():
+            ui = RegistrationApp(mrc_reader=self.mrc_reader, site_data=site_data, tem_communication=self.tem)
             ui.mainloop()
-
-            site_data.save()                    # -> <folder>/<site_id>_<timestamp>.pkl
-            self.register_site_data(site_data, active=True)
-            self.site_summaries[site_id] = site
-
+            if self.sample_type == 'airyscan':
+                #MOVE Stage to center of overlay montage
+                #Run alignment one more time with the predefined alignment
+                print('airyscan alignment complete. Please move to the next site and press ENTER to continue.')
+            elif self.sample_type == 'lamella':
+                print('lamella alignment complete. Please move to the next site and press ENTER to continue.')
         return self.site_summaries
 
-    def run_high_magnification_clem_alignment_step(self, site_data):
-        H, W = site_data.mrc.image.shape
-        center_px = (W / 2.0, H / 2.0)
-        mrc_path = self.mrc.write_mrc_crops(site_data, fov_um=2.0, output_root=site_data.path, label='crop_center_', skip_pick_id=None)
-        self.tem.align_target_at_higher_mag(reference_image_path=mrc_path) 
-        self.tem.acquire_montage(mode='Search', fov_um_x=5.0, fov_um_y=5.0, stage_tilt=self.milling_angle, site_id=site_data.site_id, eucentricity=True)
-        from clem_ui import RegistrationApp 
-        ui = RegistrationApp(mrc_reader=self.mrc, site_data=site_data, tem_communication=self.tem)
-        ui.mainloop()
-        # MISSING IMPORT TRANSFORMATION AND STORE TRANSFORMATION
-        
 

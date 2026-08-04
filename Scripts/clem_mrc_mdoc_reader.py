@@ -234,10 +234,9 @@ class MRCReader:
         return site_data
     
     def load_mrc_into_data_class(self, site_data, mrc_path):
-        self.load_mrc_montage(mrc_path)                 # reader state: montages, section_pieces, _img_hw...
-        site_data.populate_mrc(self, mrc_path)          # overwrites .mrc
+        mrc_montage = site_data.populate_mrc(self, mrc_path)   # stores into site_data.mrcs[label]
         site_data.registration = None
-        return site_data
+        return mrc_montage
 
     def load_tiff_into_data_class(self, site_data, ome_path):
         site_data.populate_tiff(self, ome_path)         
@@ -245,7 +244,6 @@ class MRCReader:
         return site_data
 
     def load_mrc_montage_data(self, mrc_path):
-        self.load_mrc_montage(mrc_path)
         return self.build_montage_summary(mrc_path)
 
     def load_mrc_single(self, mrc_filepath=None):

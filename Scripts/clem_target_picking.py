@@ -18,7 +18,7 @@ class CLEMPicker:
     def __init__(self, mrc_dataclass, tem_communication):
 
         self.mrc_dataclass = mrc_dataclass
-        if self.mrc_data is None:
+        if self.mrc_dataclass is None:
             raise ValueError("mrc_dataclass must be populated before creating CLEMPicker")
 
         self.pixel_spacing_um = self.mrc_dataclass.pixel_spacing_um
