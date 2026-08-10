@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 import numpy as np
-
+from clem_dataclasses import SiteDataSummary, AllSitesDataCollection
 
 
 class ExecutiveControls:
@@ -108,29 +108,28 @@ class ExecutiveControls:
         app = App()
         app.mainloop()
         self.tem.acquire_image(mode='View', imaging_state='grid_square') 
-        self.tem.return_control_to_serialem(message="[ToDo] Run 'align to marker' alignment. ENTER.")
+        self.tem.return_control_to_serialem(message="[ToDo] Run 'Shift to Marker' alignment. ENTER.")
 
     def run_acquire_position_montages(self):
-        from clem_dataclasses import SiteDataSummary
         sites = self._import_csv_file(filename='tem_stage_positions.csv')
         for site_number, site in enumerate(sites):
             site_id = site.get("name") or f"site_{site_number+1:02d}"
             site_dir = os.path.join(self.tem.output_root, site_id)
             os.makedirs(site_dir, exist_ok=True)
-            print(f"[INFO] Acquiring montage for {site_id}.")
-            self.tem.precise_stage_move(stage_x_um=site["stage_x_um"], stage_y_um=site["stage_y_um"], stage_z_um=site["stage_z_um"])
-            self.tem.acquire_image(mode='View', imaging_state='grid_square', save=False) 
-            input("Please move the center of the grid square / lamella to the center of the field of view. ENTER")
-            self.tem.acquire_image(mode='View', imaging_state='grid_square') 
-            input("Please move the center of the grid square / lamella to the center of the field of view. ENTER")
-            self.tem.set_eucentricity(level='rough_fine')
+            # print(f"[INFO] Acquiring montage for {site_id}.")
+            # self.tem.precise_stage_move(stage_x_um=site["stage_x_um"], stage_y_um=site["stage_y_um"], stage_z_um=site["stage_z_um"])
+            # self.tem.acquire_image(mode='View', imaging_state='grid_square', save=False) 
+            # input("Please move the center of the grid square / lamella to the center of the field of view  (shift + right click + drag). ENTER")
+            # self.tem.acquire_image(mode='View', imaging_state='grid_square') 
+            # input("Please move the center of the grid square / lamella to the center of the field of view  (shift + right click + drag). ENTER")
+            # self.tem.set_eucentricity(level='rough_fine')
             stage_x_um, stage_y_um, stage_z_um, stage_tilt = self.tem.report_stage_position()
             site_data = SiteDataSummary(site_id=site_id, path=site_dir, stage_position=[stage_x_um, stage_y_um, stage_z_um, stage_tilt], milling_angle=self.milling_angle)
-            self.tem.acquire_image(mode='View', imaging_state='grid_square', label=f"{site_id}_overview", save=True)
+            self.tem.acquire_image(mode='View', imaging_state='grid_square', site_data=site_data, label=f"overview", save=True, simple_note=True)
             self.register_site_data(site_data, active=False)
         self.tem.acquire_image(mode='View', imaging_state='grid_square') 
         self.tem.acquire_image(mode='View', imaging_state=None) # HERE THE SWITCH TO LOWDOSE MODE
-        self.tem.return_control_to_serialem(message="Run 'align to marker' alignment. Press Continue to resume.")
+        self.tem.return_control_to_serialem(message="Run 'Shift to Marker' alignment. Press Continue to resume.")
         for site_id, site_data in self.site_collection.sites.items():
             self.tem.precise_stage_move(stage_x_um = site_data.stage_position[0], stage_y_um = site_data.stage_position[1], stage_z_um = site_data.stage_position[2])
             nav_idx = self.tem.find_nav_item_with_note(f"{site_id}_overview")
@@ -139,6 +138,8 @@ class ExecutiveControls:
                     self.tem.acquire_montage_at_nav_item(site_data=site_data, mode='View', nav_idx=nav_idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], eucentricity=True) 
                 elif self.sample_type == 'lamella':
                     self.tem.acquire_montage_at_nav_item(mode='Search', nav_idx=nav_idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y'], eucentricity=True) 
+                stage_x_um, stage_y_um, stage_z_um, stage_tilt = self.tem.report_stage_position()
+                site_data.stage_position = [stage_x_um, stage_y_um, stage_z_um, stage_tilt]
                 site_data.save()
 
     def register_site_data(self, site_data, active=True):
@@ -153,16 +154,26 @@ class ExecutiveControls:
     def run_clem_alignment(self):
         from clem_ui import RegistrationApp   
         for site_id, site_data in self.site_collection.sites.items():
+            print(site_id)
             ui = RegistrationApp(mrc_reader=self.mrc_reader, site_data=site_data, tem_communication=self.tem)
             ui.mainloop()
+            try:
+                ui.destroy()
+            except Exception:
+                pass
+            
             if self.sample_type == 'airyscan':
                 cx, cy = site_data.registration.overlay_center_px  
-                idx = self.tem.add_nav_point_with_note(cx, cy, buffer="S", note=None)
+                idx = self.tem.add_nav_point_with_note(cx, cy, stage_z_um=site_data.stage_position[2], buffer="S", note='center')
                 self.tem.move_stage_to_nav_item(nav_idx=idx)
-                self.tem.acquire_montage_at_nav_item(site_data=site_data, mode='View', nav_idx=idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x_high_mag'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y_high_mag'], eucentricity=True)
+                self.tem.acquire_montage_at_nav_item(site_data=site_data, mode='Search', nav_idx=idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x_high_mag'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y_high_mag'], eucentricity=True, realign=True)
                 self.tem.delete_nav_item(nav_idx=idx)
                 ui = RegistrationApp(mrc_reader=self.mrc_reader, site_data=site_data, tem_communication=self.tem)
                 ui.mainloop()
+                try:
+                    ui.destroy()
+                except Exception:
+                    pass
             elif self.sample_type == 'lamella':
                 print('Lamella alignment complete. Please move to the next site and press ENTER to continue.')
         return self.site_summaries

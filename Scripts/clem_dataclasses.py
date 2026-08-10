@@ -276,9 +276,7 @@ class SiteDataSummary:
                                           image_height=image_parameters['image_height'],
                                           image_width=image_parameters['image_width'],
                                           magnification=image_parameters['magnification'],
-                                          pixel_spacing_um=image_parameters['pixel_spacing'],
-                                          stage_to_camera_matrix=image_parameters['stage_to_camera_matrix'],
-                                          is_to_camera_matrix=image_parameters['is_to_camera_matrix'],
+                                          pixel_spacing_um=image_parameters['pixel_spacing_um'],
                                           timestamp=image_parameters['timestamp']
                                           )
 
@@ -330,11 +328,9 @@ class SiteDataSummary:
         return cls.load(matches[-1])
 
     def __repr__(self):
-        stages = [n for n in ("mrc", "tiff", "registration", "acquisition")
+        stages = [n for n in ("mrcs", "tiff", "registration")
                   if getattr(self, n) is not None]
-        n_tiles = len(self.mrc.tiles) if self.mrc else 0
-        return (f"SiteDataSummary(site_id={self.site_id!r}, loaded={stages}, "
-                f"n_tiles={n_tiles}, n_picks={len(self.picks)})")
+        return (f"SiteDataSummary(site_id={self.site_id!r}, loaded={stages}.")
     
 
 # --------------------------------------------------------------------------- #

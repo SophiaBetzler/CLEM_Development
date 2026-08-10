@@ -16,7 +16,7 @@ from datetime import datetime
 
 class CLEMPicker:
 
-    def __init__(self, mrc_dataclass, tem_communication):
+    def __init__(self, mrc_dataclass, tem_communication, site_data=None):
 
         self.mrc_dataclass = mrc_dataclass
         if self.mrc_dataclass is None:
@@ -31,6 +31,11 @@ class CLEMPicker:
         self.site_output_root = p.parent
         self.tem = tem_communication
         self.mrc_reader = self.tem.mrc_reader
+        
+        if site_data is None:
+            sc = getattr(self.tem, "site_collection", None)
+            site_data = sc.site_data.get(self.site_id) if sc is not None else None
+        self.site_data = site_data
       
     # ════════════════════════════════════════════════════════════════════════
     # Helper and Coordinate Conversion Methods
@@ -92,8 +97,19 @@ class CLEMPicker:
         return self.mrc_dataclass.picks.copy()
 
     def add_picks_to_navigator(self, mrc_dataclass, buffer='S') -> int:
-        self.tem.add_nav_point(mrc_dataclass=mrc_dataclass, buffer=buffer)
+        self.tem.add_nav_point(mrc_dataclass=mrc_dataclass, buffer=buffer, stage_z_um=self.resolve_stage_z())
     
+    def resolve_stage_z(self):
+        if self.mrc_dataclass.stage_z_um is not None:
+            return float(self.mrc_dataclass.stage_z_um)
+        if self.mrc_dataclass.metadata is not None and self.mrc_dataclass.metadata.stage_z_um:
+            return float(self.mrc_dataclass.metadata.stage_z_um)
+        zs = [t.piece_z_stage_um for t in self.mrc_dataclass.tiles if t.piece_z_stage_um is not None]
+        if zs:
+            return float(np.median(zs))
+        if self.site_data is not None and self.site_data.stage_position:
+            return float(self.site_datastage_position[2])
+        return -999.0
 
     # ════════════════════════════════════════════════════════════════════════
     # Pick Grouping and Tracking Target Selection

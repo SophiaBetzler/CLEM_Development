@@ -190,36 +190,59 @@ class CLEMCorrelator:
         return result
 
     def run_reapply(self, record, tiff_stack, mrc_shape,
-                    tiff_pixel_spacing_um=None, mrc_pixel_spacing_um=None,
-                    status_cb=None):
-        """Re-apply a stored transform to a (possibly different, concentric)
-        TIFF.  The TIFF is flipped by the record's stored flip_x/flip_y to
-        reproduce the matched view; if the pixel size differs the transform is
-        rescaled about the shared centre."""
+                tiff_pixel_spacing_um=None, mrc_pixel_spacing_um=None,
+                status_cb=None, center_on_mrc=True):
+        """Re-apply a stored transform: rotation and flips from the record, scale
+        from the pixel-size ratio, and the TIFF footprint centred on the MRC.
+        No registration translation is carried over."""
         if isinstance(record, str):
             record = self.load_transform(record)
+    
         M = np.asarray(record.matrix, dtype=float)
-        tform = ProjectiveTransform(matrix=M)
-        note = "re-applied stored transform"
-
-        want_scale = None
+        A = M[:2, :2]
+        stored_scale = float(np.hypot(A[0, 0], A[1, 0]))
+        rot_deg = math.degrees(math.atan2(A[1, 0], A[0, 0]))
+    
+        want_scale, scale_src = stored_scale, "stored (pixel sizes unavailable)"
         if tiff_pixel_spacing_um and mrc_pixel_spacing_um:
             want_scale = float(tiff_pixel_spacing_um) / float(mrc_pixel_spacing_um)
-        if want_scale is not None and record.tiff_shape is not None:
-            old_center = self._image_center(record.tiff_shape)
-            new_center = self._image_center(tiff_stack.shape)
-            dst_anchor = self._apply(M, old_center[None, :])[0]
-            M2, stored = self._rescale_about(M, want_scale, new_center, dst_anchor)
-            tform = ProjectiveTransform(matrix=M2)
-            note = f"re-applied, rescaled {stored:.4f} -> {want_scale:.4f}"
-            M = M2
-
-        fx = bool(record.flip_x)
-        fy = bool(record.flip_y)
-        info = self._diagnostics(M, np.empty((0, 2)), np.empty((0, 2)))
-        info["text"] = note
+            scale_src = (f"{float(tiff_pixel_spacing_um):.6f} / "
+                         f"{float(mrc_pixel_spacing_um):.6f} um/px")
+    
+        src_anchor = self._image_center(tiff_stack.shape)
+        if center_on_mrc:
+            dst_anchor, anchor_txt = self._image_center(mrc_shape), "MRC centre"
+        else:
+            dst_anchor = self._apply(M, self._image_center(mrc_shape)[None, :])[0]
+            anchor_txt = "previous TIFF centre"
+    
+        M2, _ = self._rescale_about(M, want_scale, src_anchor, dst_anchor)
+        tform = ProjectiveTransform(matrix=M2)
+    
+        fx, fy = bool(record.flip_x), bool(record.flip_y)
+        H, W = tiff_stack.shape[-2:]
+        mrc_h, mrc_w = mrc_shape[-2:]
+    
+        print("[INFO] Re-applying stored transform")
+        print(f"       rotation       : {rot_deg:+.3f} deg  (preserved)")
+        print(f"       scale stored   : {stored_scale:.6f} MRC px / TIFF px")
+        print(f"       scale applied  : {want_scale:.6f} MRC px / TIFF px  <- {scale_src}")
+        print(f"       flip_x, flip_y : {fx}, {fy}")
+        print(f"       anchored on    : {anchor_txt}")
+        print(f"       TIFF centre    : ({src_anchor[0]:.1f}, {src_anchor[1]:.1f}) "
+              f"-> ({dst_anchor[0]:.1f}, {dst_anchor[1]:.1f})")
+        print(f"       footprint      : {W}x{H} TIFF px -> "
+              f"{W * want_scale:.0f}x{H * want_scale:.0f} of {mrc_w}x{mrc_h} MRC px")
+        if record.transform_type == "projective":
+            print("       [WARN] projective terms are dropped on re-apply (affine only)")
+    
+        info = self._diagnostics(M2, np.empty((0, 2)), np.empty((0, 2)))
+        info["text"] = (f"re-applied: rot {rot_deg:+.2f} deg, "
+                        f"scale {stored_scale:.4f} -> {want_scale:.4f}, "
+                        f"flips ({fx}, {fy}), centred on {anchor_txt}")
+    
         warped = self.warp_channels(tiff_stack, tform, mrc_shape,
-                                     flip_x=fx, flip_y=fy, status_cb=status_cb)
+                                    flip_x=fx, flip_y=fy, status_cb=status_cb)
         new_record = self._make_record(tform, record.transform_type, info,
                                        record.n_pairs, mrc_shape, tiff_stack.shape,
                                        fx, fy, mrc_pixel_spacing_um, tiff_pixel_spacing_um)

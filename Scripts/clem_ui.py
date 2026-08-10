@@ -1093,6 +1093,7 @@ class RegistrationApp(tk.Tk):
             if getattr(mrc_dc, "mrc_path", None):
                 self.tem.load_mrc_in_nav(mrc_dataclass=mrc_dc, buffer='S')
             self.status_var.set("MRC montage loaded.")
+            self.draw_mrc(keep_view=True)
         except Exception as e:
             import traceback; traceback.print_exc()
             messagebox.showerror("MRC montage load error", str(e))
@@ -1205,6 +1206,16 @@ class RegistrationApp(tk.Tk):
                 tx = self.ax_mrc.text(dx + 6, dy - 6, str(i + 1), color=PT_MRC,
                                       fontsize=9, fontweight="bold", zorder=6)
                 self._mrc_pt_artists.extend([ln, tx])
+        if self._last_tform is not None and self.tiff_stack is not None:
+            H, W = self.tiff_stack.shape[-2:]
+            corners = np.array([[-0.5, -0.5],
+                                [W-0.5, -0.5],
+                                [W-0.5, H-0.5],
+                                [-0.5, H-0.5],
+                                [-0.5, -0.5]], dtype=float)
+            pts = self._last_transform(corners)
+            ln, = self.ax_mrc.plots(pts[:, 0], pts[:, 1], "-", color="white", linewidth=1.5, alpha=0.9, zorder=7)
+            self._mrc_pt_artists.append(ln)
         self.canvas_mrc.draw_idle()
 
     def _draw_tiff(self, keep_view=False):
@@ -1265,6 +1276,7 @@ class RegistrationApp(tk.Tk):
             if "mrc" not in pair:
                 pair["mrc"] = (x, y); self._update_tree(); self._draw_mrc(keep_view=True)
                 self.status_var.set("MRC point set.\nNow click matching TIFF point."); return
+        self._draw_mrc(keep_view=True)
         self.point_pairs.append({"mrc": (x, y)}); self._update_tree(); self._draw_mrc(keep_view=True)
         self.status_var.set(f"MRC point #{len(self.point_pairs)} placed.\nNow click matching TIFF point.")
 
@@ -1457,17 +1469,12 @@ class RegistrationApp(tk.Tk):
                 messagebox.showwarning("No mdoc data", "Load MRC + mdoc to enable stage picking.", parent=win)
                 return
             from clem_target_picking import CLEMPicker
-            mrc_summary = self.mrc_reader.build_montage_summary(self.mrc_file_path)
             # tell the picker how the montage is displayed so its display<->true works
-            try:
-                mrc_summary.flip_x = MRCReader.MONTAGE_FLIP_X
-                mrc_summary.flip_y = MRCReader.MONTAGE_FLIP_Y
-            except Exception:
-                pass
+            
             mrc_summary = self._resolve_latest_mrc() or self.mrc_reader.build_montage_summary(self.mrc_file_path)
             mrc_summary.flip_x = MRCReader.MONTAGE_FLIP_X
             mrc_summary.flip_y = MRCReader.MONTAGE_FLIP_Y
-            clem_picker = CLEMPicker(mrc_summary, self.tem)
+            clem_picker = CLEMPicker(mrc_summary, self.tem, site_data=self.site_data)
 
             names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)] for i in range(len(self.warped_channels))]
             n_z = self.site_data.tiff.num_z_slices if self.site_data.tiff is not None else 1
@@ -1485,7 +1492,7 @@ class RegistrationApp(tk.Tk):
             StagePickerWindow(win, clem_picker=clem_picker, mrc_reader=self.mrc_reader,
                               mrc_gray_true=mrc_true, channels_gray_true=chans_true,
                               channel_names=names, warp_slice_true=warp_slice_true, n_z=n_z,
-                              site_data=site_data, title="Stage Position Picker")
+                              site_data=self.site_data, title="Stage Position Picker")
 
         ttk.Button(btns, text="Open Stage Picker", style="Mont.TButton",
                    command=open_stage_picker).pack(side="left", padx=(0, 6), pady=4)

@@ -44,35 +44,40 @@ class TEMComm:
         nav_file = os.path.join(self.output_root, "nav_file" + "_" + timestamp + '.nav')
         sem.OpenNavigator(nav_file)
 
-    def add_nav_point_with_note(self, px, py, buffer="S", note=None):
+    def add_nav_point_with_note(self, px, py, stage_z_um=None, buffer="S", note=None):
         if note is None:
             raise ValueError("Note cannot be None")
-        idx = int(sem.AddImagePosAsNavPoint(buffer, px, py, 0, 1))
+        if stage_z_um is not None:
+            idx = int(sem.AddImagePosAsNavPoint(buffer, px, py, stage_z_um, 0, 1))
+        else:
+            idx = int(sem.AddImagePosAsNavPoint(buffer, px, py, 0, 1))
         sem.ChangeItemNote(idx, note)
         return idx
 
-    def add_nav_point(self, mrc_dataclass, buffer="S"):
+    def add_nav_point(self, mrc_dataclass, buffer="S", stage_z_um=None):
         self.set_montage_to_buffer(note=mrc_dataclass.montage_id, buffer=buffer)
-        stage_z = mrc_dataclass.stage_z_um if mrc_dataclass.stage_z_um is not None else 0.0
-        if len(mrc_dataclass.groups) == 0 and len(mrc_dataclass.picks) != 0:
-            for pick in mrc_dataclass.picks[:-1]:
-                idx = []
-                idx = int(sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, stage_z, 0, 1))
-                sem.ChangeItemNote(idx, pick.pick_id)
-            idx = int(sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, stage_z, 0, 0))
-            sem.ChangeItemNote(idx, mrc_dataclass.picks[-1].pick_id)
-        elif len(mrc_dataclass.groups) != 0:
+        if stage_z_um is None:
+            stage_z_um = mrc_dataclass.stage_z_um
+        stage_z = float(stage_z_um) if stage_z_um is not None else -999.0
+        indices = []
+        
+        def _add(pick, group_id=0, note=None, suppress_redraw=1):
+            idx = int(sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, stage_z, group_id, suppress_redraw))
+            sem.ChangeItemNote(idx, note)
+            indices.append(idx)
+            return idx
+        
+        if mrc_dataclass.groups:
             for group in mrc_dataclass.groups:
-                for pick in mrc_dataclass.picks[:-1]:
-                    idx = []
-                    idx = int(sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, group.group_id, 1))
-                    sem.ChangeItemNote(idx, pick.pick_id)
-                idx = int(sem.AddImagePosAsNavPoint(buffer, mrc_dataclass.picks[-1].image_coord_x, mrc_dataclass.picks[-1].image_coord_y, stage_z, group.group_id, 0))
-                sem.ChangeItemNote(idx, mrc_dataclass.picks[-1].pick_id)
-        elif len(mrc_dataclass.groups) == 0 and len(mrc_dataclass.picks) == 0:
-            raise ValueError(f"No picks exists for this montage {mrc_dataclass.montage_id}.")
+                for pick in group.picks[:-1]:
+                    _add(pick, group_id=group.group_id, note=f"group_{group.group_id}_{pick.pick_id}", suppress_redraw=1)
+                _add(group.picks[-1], group_id=group.group_id, note=f"group_{group.group_id}_{pick.pick_id}", suppres_redraw=0)
         else:
-            return
+            for pick in mrc_dataclass.picks[:-1]:
+                _add(pick, note=f"pick_{pick.pick_id}", suppress_redraw=1)
+            _add(pick[-1], note=f"pick_{pick.pick_id}", suppress_redraw=0)
+        
+        return indices
 
     def load_mrc_in_nav(self, site_data=None, mrc_dataclass=None, buffer=None):
         if mrc_dataclass is None:
@@ -90,29 +95,30 @@ class TEMComm:
                 self.create_nav_file()               # was self._create_nav_file()
 
             idx = int(sem.NavIndexWithNote(mrc_dataclass.montage_id))
-            if idx > 0:
-                sem.LoadOtherMap(idx, buffer)        # already in the navigator
-            else:
+            if idx <= 0:
                 while sem.ReportFileNumber() > 0:
                     sem.CloseFile()
                 sem.OpenOldFile(mrc_path)            # not in nav -> open the montage file
                 sem.ReadFile(0)
-                sem.NewMap(0, mrc_dataclass.montage_id)
-                if buffer != "A":
-                    sem.Copy("A", buffer)
+                idx = int(sem.NewMap(0, mrc_dataclass.montage_id))
+                sem.CloseFile()
+            sem.LoadOtherMap(idx, buffer) 
         except Exception as e:
             print(f"[WARN] load_mrc_in_nav ({'offline' if self.offline else 'live'}): {e}")
+        return idx
 
     def save_buffer_image(self, site_data, label=None):
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()
-        filename_parts = [site_data.site_id, label, f"mag_{mag}", timestamp, '.mrc']
-        filename = "_".join(str(part).strip("_") for part in filename_parts if part is not None and str(part) != "")
-        os.makedirs(site_data.path, exist_ok=True)
+        stem = "_".join(str(p) for p in (site_data.site_id, label, f"mag_{int(mag)}", timestamp) if p is not None and str(p) != "")
+        filename = stem + ".mrc"
         file_path = os.path.join(site_data.path, filename)
+        os.makedirs(site_data.path, exist_ok=True)
+
         sem.OpenNewFile(file_path)
-        sem.Save()                 
-        sem.CloseFile()
+        sem.Save()  
+             
+        
         return filename, timestamp
 
     def find_nav_item_with_note(self, note):
@@ -176,7 +182,7 @@ class TEMComm:
     # fundamental microscope controls
     # ---------------------------------------------------------------------------
 
-    def acquire_image(self, mode, imaging_state=None, save=False, site_data=None, label=None, buffer=None):
+    def acquire_image(self, mode, imaging_state=None, save=False, site_data=None, label=None, buffer=None, simple_note=False):
 
         if self.offline:
             print(f"[INFO] Image acquisition triggered with {imaging_state}, {mode}.")
@@ -191,17 +197,18 @@ class TEMComm:
         if save:
             filename, timestamp = self.save_buffer_image(site_data, label=label)
             if sem.ReportIfNavOpen() == 0:
-                self._create_nav_file()
-            nav_idx = int(sem.NewMap(0, filename))
+                self.create_nav_file()
+            if simple_note:
+                nav_idx = int(sem.NewMap(0, f"{site_data.site_id}_{label}"))
+            else:
+                nav_idx = int(sem.NewMap(0, filename))
                           
             image_parameters = {'image_path': os.path.join(site_data.path,  filename),
                                 'image_id' : filename,
-                                'image_height' : image_properties["image_height_px"],
-                                'image_width' : image_properties["image_width_px"],
+                                'image_height' : image_properties["img_height_px"],
+                                'image_width' : image_properties["img_width_px"],
                                 'pixel_spacing_um' : image_properties["pixel_spacing_um"],
-                                'magnification' : image_properties["magnificiation"],
-                                'stage_to_camera_matrix' : self.report_stage_to_camera_matrix(),
-                                'is_to_camera_matrix' : self.report_image_shift_to_camera_matrix(),
+                                'magnification' : image_properties["magnification"],
                                 'timestamp' : timestamp,
                                 }
             site_data.add_image(label=label, image_parameters=image_parameters)
@@ -222,7 +229,7 @@ class TEMComm:
         if self.offline:
             print("[INFO] Eucentricity routine.")
             return
-        self._reset_defocus()
+        self.reset_defocus()
         eucentricity_settings = {'fine': 2, 'rough': 1, 'rough_fine': 3}
         sem.Eucentricity(eucentricity_settings[level])
 
@@ -327,17 +334,29 @@ class TEMComm:
     def delete_nav_item(self, nav_idx):
         if nav_idx > 0:
             sem.SetSelectedNavItem(nav_idx)   
-            sem.DeleteNavigatorItem()    
+            sem.DeleteNavigatorItem(nav_idx)    
 
 
     # ---------------------------------------------------------------------------
     # Montage control
     # ---------------------------------------------------------------------------
     
-    def acquire_montage_at_nav_item(self, site_data, nav_idx, fov_um_x, fov_um_y, mode='Search', imaging_state=None, eucentricity=False, label=None):
+    def acquire_montage_at_nav_item(self, site_data, nav_idx, fov_um_x, fov_um_y, mode='Search', imaging_state=None, eucentricity=False, label=None, realign=False):
         if self.offline is False:
             sem.MoveToNavItem(nav_idx)
             sem.Delay(2, 'sec')
+            if eucentricity is True and realign is False:
+                self.set_eucentricity(level='rough_fine')
+            if site_data is not None:
+                self.precise_stage_move(stage_tilt=site_data.milling_angle)
+            if realign:
+                sem.MoveToNavItem(nav_idx)
+                self.set_eucentricity(level='rough_fine')
+                sem.SkipZMoveNextNavRealign(1)
+                sem.RealignToOtherItem(nav_idx, 1)
+            else:
+                sem.MoveToNavItem(nav_idx)
+                sem.Delay(2, 'sec')
         self.acquire_montage(site_data=site_data, mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, imaging_state=imaging_state, eucentricity=eucentricity, label=label)
 
 
@@ -371,10 +390,10 @@ class TEMComm:
         timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
         mag, *_ = sem.ReportMag()
         if site_data is not None and site_data.site_id is not None:
-            filepath = os.path.join(self.output_root, site_data.site_id, site_data.site_id + '_montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
+            filepath = os.path.join(self.output_root, site_data.site_id, site_data.site_id + '_montage_' +'mag_' + str(int(mag)) + '_' + timestamp + '.mrc')
             os.makedirs(os.path.join(self.output_root, site_data.site_id), exist_ok=True)
         else:
-            filepath = os.path.join(self.output_root, 'Montage_' +'mag_' + str(mag) + '_' + timestamp + '.mrc')
+            filepath = os.path.join(self.output_root, 'Montage_' +'mag_' + str(int(mag)) + '_' + timestamp + '.mrc')
 
         if site_data is not None:
             self.precise_stage_move(stage_tilt=site_data.milling_angle)
@@ -403,14 +422,12 @@ class TEMComm:
                   # max image shift in micron, only relevant when first argument is 2, otherwise set to -1
 
         sem.Montage()
-        if site_data is not None and site_data.site_id is not None:
-            montage_id = f"{site_data.site_id}_montage_{timestamp}"                  
-        else:
-            montage_id = f"Montage_{timestamp}"
         if self.offline is False:
+            montage_id = os.path.splitext(os.path.basename(filepath))[0]
             sem.NewMap(0, montage_id)
+            sem.CloseFile()
         if site_data is not None:
-            self.mrc_reader.build_montage_summary(site_data=site_data, label=label, timestamp=timestamp)
+            site_data.populate_mrc(self.mrc_reader_filepath)
 
    ### HAVEN'T CLEANED UP BELOW YET - NEEDS TO BE REWRITTEN TO USE NEW ALIGNMENT FUNCTION
             

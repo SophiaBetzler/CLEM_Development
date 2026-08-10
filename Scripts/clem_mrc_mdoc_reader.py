@@ -299,10 +299,6 @@ class MRCReader:
         self.mrc_image = self._normalize_image(data)
         return self.mrc_image, info
 
-    
-
-
-
     def load_ome_tiff(self, ome_path):
         import tifffile
 
@@ -681,7 +677,6 @@ class MRCReader:
 
         self._build_section_pieces(pieces_all)
 
-
         alignment = self.coord_key
         key = self.coord_key
 
@@ -703,7 +698,7 @@ class MRCReader:
                             piece_y_stage_um=(st or {}).get("stage_y_um")))
 
         base = os.path.splitext(os.path.basename(mrc_filepath))[0]
-        montage_id = f"{site_id}_montage_{base}" if site_id else f"montage_{base}"
+        montage_id = f"{base}"
 
         metadata = MontageMetadata(
                                     pixel_spacing_um=pixel_spacing_um,
