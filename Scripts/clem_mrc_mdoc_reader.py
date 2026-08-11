@@ -299,10 +299,20 @@ class MRCReader:
         self.mrc_image = self._normalize_image(data)
         return self.mrc_image, info
 
+    @staticmethod
+    def _sniff_header(path, want, kind):
+        with open(os.fspath(path), "rb") as fh:
+            head = fh.read(10)
+        if head[:4] == b"\x00\x05\x16\x07":
+            raise ValueError(f"{kind} file {path} appears to be a CZI, not a {kind}.")
+        if not any(head.startswith(w) for w in want):
+            raise ValueError(f"{kind} file {path} does not appear to be a valid {kind}.")
+        
     def load_ome_tiff(self, ome_path):
         import tifffile
 
         ome_path = os.fspath(ome_path)
+        self._sniff_header(ome_path, want=(b"II", b"MM"), kind="TIFF")
 
         with tifffile.TiffFile(ome_path) as tf:
             data = tf.asarray()
@@ -400,6 +410,7 @@ class MRCReader:
     
     def load_czi(self, czi_path):
         czi_path = os.fspath(czi_path)
+        self._sniff_header(czi_path, want=(b"ZISRAWFILE",), kind="CZI")
         arr, axes = None, None
         try:
             from aicspylibczi import CziFile

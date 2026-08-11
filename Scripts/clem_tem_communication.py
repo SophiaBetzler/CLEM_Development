@@ -427,7 +427,7 @@ class TEMComm:
             sem.NewMap(0, montage_id)
             sem.CloseFile()
         if site_data is not None:
-            site_data.populate_mrc(self.mrc_reader_filepath)
+            site_data.populate_mrc(self.mrc_reader.filepath)
 
    ### HAVEN'T CLEANED UP BELOW YET - NEEDS TO BE REWRITTEN TO USE NEW ALIGNMENT FUNCTION
             

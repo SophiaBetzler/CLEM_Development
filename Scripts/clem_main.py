@@ -10,9 +10,9 @@ import scipy
 from clem_dataclasses import AllSitesDataCollection, SiteDataSummary
 
 
-PATH = r"Z:\s26aug08a"
+PATH = r"C:\\Users\\CZII\\Documents\\Data\\s26jul23a"
 SAMPLE_TYPE = 'airyscan'
-OFFLINE = False
+OFFLINE = True
 if SAMPLE_TYPE == 'airyscan':
     MILLING_ANGLE = 0.0
 else:

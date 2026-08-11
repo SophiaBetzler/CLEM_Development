@@ -48,7 +48,6 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-import matplotlib.patheffects as pe
 
 try:
     import mrcfile
@@ -668,13 +667,6 @@ class RegistrationApp(tk.Tk):
 
         self._last_tform = None
         self._loaded_record = None
-        # Rotation preview for the right panel (from "Import Rot/Flip Only"):
-        # display-TIFF -> display-MRC rotation in degrees, plus the forward /
-        # inverse 3x3 maps between unrotated and rotated display coordinates.
-        self.tiff_disp_rot_deg = 0.0
-        self._disp_rot_fwd = None
-        self._disp_rot_inv = None
-        self._rot_canvas_hw = None
         self._mrc_img_dirty = False
         self._tiff_img_dirty = False
         self._mrc_pt_artists = []
@@ -750,13 +742,6 @@ class RegistrationApp(tk.Tk):
 
     MRC_EXTS = (".mrc", ".rec", ".mrcs", ".map", ".st")
 
-    @staticmethod
-    def _is_real_image_file(p):
-        """False for macOS AppleDouble sidecars ('._name.tif', header
-        0x00051607) and other hidden files, which pathlib.glob('*.tif')
-        happily matches and which crash tifffile/mrcfile."""
-        return not Path(p).name.startswith((".", "._"))
-
     def _candidate_mrcs_in_folder(self, folder):
         """All MRC-like files in the site folder (then one level of subfolders),
         newest last.  Files that have an mdoc beside them come first, because
@@ -765,8 +750,7 @@ class RegistrationApp(tk.Tk):
         found = []
         for pattern in ("*", "*/*"):
             for p in folder.glob(pattern):
-                if (p.is_file() and p.suffix.lower() in self.MRC_EXTS
-                        and self._is_real_image_file(p)):
+                if p.is_file() and p.suffix.lower() in self.MRC_EXTS:
                     found.append(p)
             if found:
                 break
@@ -815,15 +799,10 @@ class RegistrationApp(tk.Tk):
         if not folder:
             return None
         folder = Path(folder)
-        # NB: '*.tif' already covers '*.ome.tif'; use a set so nothing is
-        # counted twice, and drop AppleDouble '._' sidecars (glob matches
-        # them, tifffile then dies with "not a Tiff file: header=0x00051607").
-        ome = sorted({p for p in [*folder.glob("*.tif"), *folder.glob("*.tiff")]
-                      if self._is_real_image_file(p)},
+        ome = sorted([*folder.glob("*.ome.tif"), *folder.glob("*.ome.tiff"),
+                      *folder.glob("*.tif"), *folder.glob("*.tiff")],
                      key=lambda p: p.stat().st_mtime)
-        czi = sorted((p for p in folder.glob("*.czi")
-                      if self._is_real_image_file(p)),
-                     key=lambda p: p.stat().st_mtime)
+        czi = sorted(folder.glob("*.czi"), key=lambda p: p.stat().st_mtime)
         try:
             if ome:
                 self.mrc_reader.load_tiff_into_data_class(site_data=self.site_data,
@@ -849,58 +828,8 @@ class RegistrationApp(tk.Tk):
             self._display_loaded_mrc_data(mrc_dc)
 
     def _get_tiff_slice(self, c, z):
-        """DISPLAY slice: flipped per the X and Y checkboxes, then rotated by
-        the imported rotation preview (if one is active)."""
-        img = MRCReader._flip_for_display(self.tiff_stack[c, z], self.flip_x.get(), self.flip_y.get())
-        if self._disp_rot_inv is not None:
-            img = warp(img, ProjectiveTransform(matrix=self._disp_rot_inv),
-                       output_shape=self._rot_canvas_hw, order=1,
-                       preserve_range=True, mode="constant", cval=0.0).astype(np.float32)
-        return img
-
-    # ---------------- rotation preview (Import Rot/Flip Only) ----------------
-
-    def _set_display_rotation(self, rot_deg):
-        """Enable/disable the rotation preview on the right panel.
-
-        rot_deg is the display-TIFF -> display-MRC rotation (deg) taken from
-        the transform record; the rotated canvas is enlarged so the whole
-        frame stays visible.  Content is rotated exactly as the warp onto the
-        MRC rotates it, so the right panel previews the TIFF as it will land
-        on the montage."""
-        self.tiff_disp_rot_deg = float(rot_deg or 0.0)
-        self._disp_rot_fwd = self._disp_rot_inv = self._rot_canvas_hw = None
-        if self.tiff_stack is None or abs(self.tiff_disp_rot_deg) < 1e-6:
-            return
-        h, w = self.tiff_stack.shape[-2:]
-        a = np.deg2rad(self.tiff_disp_rot_deg)
-        R = np.array([[np.cos(a), -np.sin(a)],
-                      [np.sin(a),  np.cos(a)]], dtype=float)
-        c_in = np.array([(w - 1) / 2.0, (h - 1) / 2.0])
-        corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], float)
-        rc = (R @ (corners - c_in).T).T
-        w2 = int(np.ceil(rc[:, 0].max() - rc[:, 0].min() + 1))
-        h2 = int(np.ceil(rc[:, 1].max() - rc[:, 1].min() + 1))
-        F = np.eye(3)
-        F[:2, :2] = R
-        F[:2, 2] = np.array([(w2 - 1) / 2.0, (h2 - 1) / 2.0]) - R @ c_in
-        self._disp_rot_fwd = F                       # unrotated -> rotated coords
-        self._disp_rot_inv = np.linalg.inv(F)        # rotated -> unrotated coords
-        self._rot_canvas_hw = (h2, w2)
-
-    def _pairs_for_fit(self):
-        """Landmark pairs with TIFF picks mapped back from the rotated display
-        canvas to the unrotated display frame the correlator fits/warps in."""
-        if self._disp_rot_inv is None:
-            return self.point_pairs
-        out = []
-        for p in self.point_pairs:
-            q = dict(p)
-            if "tiff" in q:
-                v = self._disp_rot_inv @ np.array([q["tiff"][0], q["tiff"][1], 1.0])
-                q["tiff"] = (float(v[0]), float(v[1]))
-            out.append(q)
-        return out
+        """DISPLAY slice: flipped per the X and Y checkboxes."""
+        return MRCReader._flip_for_display(self.tiff_stack[c, z], self.flip_x.get(), self.flip_y.get())
 
     # ---------------- display of stored site data ----------------
 
@@ -941,14 +870,12 @@ class RegistrationApp(tk.Tk):
         self.mrc_image = data.image
         self._mrc_img_dirty = True
         self._draw_mrc()
-        self._update_scale_info()
 
     def _display_loaded_tiff_data(self, data):
         stack = data.stack_czyx if getattr(data, "stack_czyx", None) is not None else data.czi_overview
         if stack is None:
             return
         self.tiff_stack = stack
-        self._set_display_rotation(0.0)     # new image: drop any rotation preview
         self._tiff_img_dirty = True
         C, Z = self.tiff_stack.shape[:2]
         self.channel_spin.config(to=max(0, C - 1)); self.channel_var.set(0)
@@ -959,7 +886,6 @@ class RegistrationApp(tk.Tk):
         src_path = getattr(data, "ome_path", None) or getattr(data, "czi_path", None)
         label = os.path.basename(os.fspath(src_path)) if src_path else "image"
         self.tiff_info_var.set(label + "  " + (getattr(data, "info", "") or ""))
-        self._update_scale_info()
         self._draw_tiff()
 
     # ---------------- styles / UI ----------------
@@ -1004,10 +930,6 @@ class RegistrationApp(tk.Tk):
         self.z_spin = ttk.Spinbox(top, from_=0, to=0, textvariable=self.z_var,
                                   width=4, command=self._refresh_tiff)
         self.z_spin.pack(side="left", padx=2)
-        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=6)
-        self.scale_info_var = tk.StringVar(value="TIF px ?   MRC px ?   scale ?")
-        ttk.Label(top, textvariable=self.scale_info_var, style="Sm.TLabel",
-                  foreground=CYA).pack(side="left", padx=3)
         ttk.Label(top, text="  scroll=zoom  middle/shift-drag=pan  left-click=landmark",
                   style="Sm.TLabel", foreground=BG3).pack(side="right", padx=6)
 
@@ -1051,9 +973,6 @@ class RegistrationApp(tk.Tk):
                    command=self._export_transform).grid(row=3, column=0, sticky="ew", padx=(0, 2), pady=2)
         ttk.Button(bg, text="Import Transform",
                    command=self._import_transform).grid(row=3, column=1, sticky="ew", padx=(2, 0), pady=2)
-        ttk.Button(bg, text="Import Rot/Flip Only", style="Mont.TButton",
-                   command=self._import_transform_rot_only).grid(row=4, column=0, columnspan=2,
-                                                                 sticky="ew", pady=2)
 
     def _make_mrc_panel(self, parent):
         lf = ttk.LabelFrame(parent, text="MRC  --  left-click to place landmark", padding=4)
@@ -1174,7 +1093,7 @@ class RegistrationApp(tk.Tk):
             if getattr(mrc_dc, "mrc_path", None):
                 self.tem.load_mrc_in_nav(mrc_dataclass=mrc_dc, buffer='S')
             self.status_var.set("MRC montage loaded.")
-            self._draw_mrc(keep_view=True)
+            self.draw_mrc(keep_view=True)
         except Exception as e:
             import traceback; traceback.print_exc()
             messagebox.showerror("MRC montage load error", str(e))
@@ -1185,11 +1104,6 @@ class RegistrationApp(tk.Tk):
         if not path:
             return
         try:
-            if not self._is_real_image_file(path):
-                real = Path(path).with_name(Path(path).name.lstrip("._"))
-                raise ValueError(
-                    f"{Path(path).name} is a macOS metadata sidecar (AppleDouble), "
-                    f"not an image. Load {real.name} instead.")
             if os.path.splitext(path)[1].lower() == ".czi":
                 self.mrc_reader.load_czi_into_data_class(site_data=self.site_data, czi_path=path)
             else:
@@ -1299,21 +1213,9 @@ class RegistrationApp(tk.Tk):
                                 [W-0.5, H-0.5],
                                 [-0.5, H-0.5],
                                 [-0.5, -0.5]], dtype=float)
-            pts = self._last_tform(corners)
-            ln, = self.ax_mrc.plot(pts[:, 0], pts[:, 1], "-", color="white",
-                                   linewidth=1.5, alpha=0.9, zorder=7)
+            pts = self._last_transform(corners)
+            ln, = self.ax_mrc.plots(pts[:, 0], pts[:, 1], "-", color="white", linewidth=1.5, alpha=0.9, zorder=7)
             self._mrc_pt_artists.append(ln)
-            # annotate the frame with rotation angle and physical size
-            M = np.asarray(self._last_tform.params, dtype=float)
-            rot = np.degrees(np.arctan2(M[1, 0], M[0, 0]))
-            tps = self._tiff_scale()
-            lbl = f"rot {rot:+.1f} deg"
-            if tps:
-                lbl += f"   {W * tps:.0f} x {H * tps:.0f} um"
-            tx = self.ax_mrc.text(float(pts[:, 0].min()), float(pts[:, 1].min()) - 10,
-                                  lbl, color="white", fontsize=8, zorder=7,
-                                  path_effects=[pe.withStroke(linewidth=2, foreground="black")])
-            self._mrc_pt_artists.append(tx)
         self.canvas_mrc.draw_idle()
 
     def _draw_tiff(self, keep_view=False):
@@ -1421,7 +1323,6 @@ class RegistrationApp(tk.Tk):
             self._draw_mrc(keep_view=True)
         self._last_tform = None
         self._loaded_record = None
-        self._set_display_rotation(0.0)     # rotation preview was tied to the record's flips
         self._refresh_tiff()
         self.status_var.set("Flip changed. Landmarks cleared -- orient first, then pick.")
 
@@ -1448,13 +1349,13 @@ class RegistrationApp(tk.Tk):
                     mrc_pixel_spacing_um=self.mrc_pixel_spacing_um, status_cb=status_cb)
             elif record is not None:
                 result = self.correlator.run_reapply_refine(
-                    record, self._pairs_for_fit(), ttype, self.tiff_stack, self.mrc_image.shape,
+                    record, self.point_pairs, ttype, self.tiff_stack, self.mrc_image.shape,
                     flip_x=fx, flip_y=fy,
                     mrc_pixel_spacing_um=self.mrc_pixel_spacing_um,
                     tiff_pixel_spacing_um=self._tiff_scale(), status_cb=status_cb)
             else:
                 result = self.correlator.run_fit_and_warp(
-                    self._pairs_for_fit(), ttype, self.tiff_stack, self.mrc_image.shape,
+                    self.point_pairs, ttype, self.tiff_stack, self.mrc_image.shape,
                     flip_x=fx, flip_y=fy, status_cb=status_cb,
                     mrc_pixel_spacing_um=self.mrc_pixel_spacing_um,
                     tiff_pixel_spacing_um=self._tiff_scale(),
@@ -1520,82 +1421,6 @@ class RegistrationApp(tk.Tk):
         except Exception as e:
             import traceback; traceback.print_exc()
             messagebox.showerror("Import error", str(e))
-
-    def _update_scale_info(self):
-        tps, mps = self._tiff_scale(), self.mrc_pixel_spacing_um
-        t = f"TIF px {tps:.4f} um" if tps else "TIF px ?"
-        m = f"MRC px {mps:.4f} um" if mps else "MRC px ?"
-        s = f"scale {tps / mps:.2f} MRC px/TIF px" if (tps and mps) else "scale ?"
-        self.scale_info_var.set(f"{t}   {m}   {s}")
-
-    def _import_transform_rot_only(self):
-        """Import a stored transform but keep ONLY its rotation and flips.
-
-        - scale comes from the pixel sizes (TIFF um/px / MRC um/px), not from
-          the stored fit;
-        - the TIFF footprint is centred on the current MRC and warped there
-          immediately (no landmarks needed);
-        - the right panel shows the TIFF flipped + rotated as it lands on the
-          MRC; the white rectangle on the MRC shows its size and rotation."""
-        if self.mrc_image is None or self.tiff_stack is None:
-            messagebox.showwarning("Missing data", "Load both the MRC and the TIFF first."); return
-        path = filedialog.askopenfilename(title="Import transform (rotation + flips only)",
-            filetypes=[("Transforms", ("*.yaml", "*.yml", "*.csv", "*.txt")), ("All files", "*")])
-        if not path:
-            return
-
-        def status_cb(msg):
-            self.status_var.set(msg); self.update_idletasks()
-
-        try:
-            record = self.correlator.load_transform(path)
-            # Orientation comes from the record; lock the checkboxes so the
-            # preview stays consistent (re-loading a TIFF re-enables them).
-            self.flip_x.set(bool(record.flip_x))
-            self.flip_y.set(bool(record.flip_y))
-            for cb in (getattr(self, "flip_x_cb", None), getattr(self, "flip_y_cb", None)):
-                if cb is not None:
-                    cb.config(state="disabled")
-            self.point_pairs.clear(); self._update_tree()
-
-            tps = self._tiff_scale()
-            if not tps:
-                messagebox.showwarning("No pixel size",
-                    "The TIFF/CZI metadata has no pixel size -- the stored fit "
-                    "scale is used instead of the pixel-size ratio.")
-            result = self.correlator.run_reapply(
-                record, self.tiff_stack, self.mrc_image.shape,
-                tiff_pixel_spacing_um=tps,
-                mrc_pixel_spacing_um=self.mrc_pixel_spacing_um,
-                status_cb=status_cb, center_on_mrc=True)
-
-            rec = result["record"]
-            self._loaded_record = rec
-            self._last_tform = result["transform"]
-            self.warped_channels = result["warped_channels"]
-            ttype = rec.transform_type or "similarity"
-            if ttype in ("euclidean", "similarity", "affine", "projective"):
-                self.transform_var.set(ttype)
-            self.site_data.set_registration(result, transform_type=ttype,
-                                            flip_x=rec.flip_x, flip_y=rec.flip_y)
-
-            rot = float(result["fit_info"].get("rotation_deg") or 0.0)
-            self._set_display_rotation(rot)
-            self._refresh_tiff()
-            self._draw_mrc(keep_view=True)      # white footprint rectangle
-            self._update_scale_info()
-
-            mps = self.mrc_pixel_spacing_um
-            scale_txt = (f"{tps / mps:.3f} MRC px/TIF px (px-size ratio)"
-                         if (tps and mps) else "stored fit scale")
-            self.status_var.set(
-                f"Rot/flip import: rot {rot:+.2f} deg, flips "
-                f"({bool(rec.flip_x)}, {bool(rec.flip_y)}), scale {scale_txt}.\n"
-                "Footprint centred on MRC (white frame). Pick landmarks + Apply "
-                "to refine the position.")
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            messagebox.showerror("Rot/flip import error", str(e))
 
     # ---------------- overlay + picker ----------------
 
@@ -1748,4 +1573,3 @@ if __name__ == "__main__":
                                 path=site_folder, milling_angle=args.milling_angle)
     RegistrationApp(mrc_reader=mrc_reader, site_data=site_data,
                     tem_communication=tem).mainloop()
-

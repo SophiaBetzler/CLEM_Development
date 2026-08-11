@@ -140,6 +140,8 @@ def find_czis(folder, recursive=False):
     hits = glob.glob(os.path.join(folder, pattern), recursive=recursive)
     seen, out = set(), []
     for p in sorted(hits):
+        if os.path.basename(p).startswith("._"):
+            continue
         key = os.path.normcase(os.path.abspath(p))
         if key not in seen:
             seen.add(key); out.append(p)
