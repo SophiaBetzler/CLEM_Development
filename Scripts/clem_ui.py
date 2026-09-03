@@ -75,6 +75,119 @@ CHANNEL_COLORS = [(0., 1., 0.), (1., 0., 1.), (0., 1., 1.),
                   (1., 1., 0.), (1., .5, 0.), (.5, 0., 1.)]
 CHANNEL_COLOR_NAMES = ["green", "magenta", "cyan", "yellow", "orange", "purple"]
 
+# ---------------------------------------------------------------------------
+# Channel roles
+# ---------------------------------------------------------------------------
+# A stack's channels are assigned roles rather than colours-by-position, because
+# not every dataset carries every channel. The default is positional
+# (ch0 reflection, then red, green, blue) and can be overridden per channel from
+# the dropdown in the Brightness/Contrast panel.
+#
+# "reflection" is a reference channel, not a fluorophore: it is deliberately
+# EXCLUDED from the fluorescence composite and instead gets its own
+# TEM + reflection overlay, drawn in green.
+CHANNEL_ROLES = ("reflection", "red", "green", "blue", "off")
+
+ROLE_RGB = {"reflection": (0., 1., 0.),      # green, in its own overlay only
+            "red":        (1., 0., 0.),
+            "green":      (0., 1., 0.),
+            "blue":       (0., 0., 1.),
+            "off":        None}
+
+ROLE_HEX = {"reflection": "#00ff00", "red": "#ff0000", "green": "#00ff00",
+            "blue": "#0000ff", "off": "#555555"}
+
+DEFAULT_ROLE_ORDER = ("reflection", "red", "green", "blue")
+
+# Roles that take part in the fluorescence composite.
+COMPOSITE_ROLES = ("red", "green", "blue")
+
+
+def default_role(idx):
+    """Positional default for channel `idx`; anything beyond blue starts off."""
+    return DEFAULT_ROLE_ORDER[idx] if idx < len(DEFAULT_ROLE_ORDER) else "off"
+
+
+def role_rgb(role):
+    return ROLE_RGB.get(role)
+
+
+def is_composite_role(role):
+    return role in COMPOSITE_ROLES
+
+
+# Compression for saved overlay panels. "zlib" (deflate) is lossless and
+# readable by ImageJ/Fiji, tifffile and bioformats without extra packages. Set
+# to None to write uncompressed; "lzw" is an alternative, and "zstd" is faster
+# and smaller but needs the imagecodecs package.
+TIFF_COMPRESSION = "zlib"
+
+
+def tiff_write(path, data, **kwargs):
+    """tifffile.imwrite with compression, tolerating tifffile API differences.
+
+    Newer tifffile takes compression=; older versions took compress=; and a
+    codec may be unavailable, as is compression itself for ImageJ hyperstacks.
+    Any of those falls back to uncompressed rather than losing the save.
+    """
+    if TIFF_COMPRESSION:
+        for kw in ("compression", "compress"):
+            try:
+                return tifffile.imwrite(path, data, **{kw: TIFF_COMPRESSION}, **kwargs)
+            except TypeError:
+                continue            # this tifffile doesn't take that keyword
+            except ValueError:
+                break               # keyword is fine, codec/format is not
+    return tifffile.imwrite(path, data, **kwargs)
+
+
+def overlay_panel_plan(roles, n_channels):
+    """Which overlay panels to build for a given set of channel roles.
+
+    Returns a list of (title, colors, is_gray). `colors` is the per-channel
+    colour list to hand to composite_overlay -- None entries drop that channel
+    -- or None for the plain MRC panel.
+
+    Copes with stacks that carry only some of the channels: a role that is not
+    present simply produces no panel, so a 2-channel file yields a shorter
+    figure rather than an error.
+    """
+    roles = list(roles)[:n_channels]
+    roles += ["off"] * (n_channels - len(roles))
+
+    plan = [("MRC (reference)", None, True)]
+
+    # Reflection is a reference channel, not a fluorophore: its own overlay,
+    # in green, and deliberately absent from the composite below.
+    refl = [i for i, r in enumerate(roles) if r == "reflection"]
+    if refl:
+        plan.append(("TEM + reflection (green)",
+                     [role_rgb("reflection") if i in refl else None
+                      for i in range(n_channels)],
+                     False))
+
+    comp = [role_rgb(r) if is_composite_role(r) else None for r in roles]
+    for i, col in enumerate(comp):
+        if col is None:
+            continue
+        plan.append((f"MRC + Ch {i} ({roles[i]})",
+                     [col if k == i else None for k in range(n_channels)],
+                     False))
+
+    # With a single fluorescence channel the composite would just repeat the
+    # per-channel panel, so only add it when there is something to combine.
+    if sum(c is not None for c in comp) > 1:
+        plan.append(("Full composite", comp, False))
+    return plan
+
+
+def _panel_slug(title):
+    """Filename-safe suffix for a panel title."""
+    out = title.lower()
+    for a, b in ((" + ", "_"), (" ", "_"), ("(", ""), (")", "")):
+        out = out.replace(a, b)
+    return out
+
 PT_MRC = "#FF4444"; PT_TIFF = "#44AAFF"
 ZOOM_FACTOR = 1.25
 
@@ -183,12 +296,23 @@ def apply_bc(img, vmin, vmax):
         return np.zeros_like(img)
     return np.clip((img - vmin) / (vmax - vmin), 0.0, 1.0)
 
-def composite_overlay(mrc_bc, channels_bc, alpha_mrc=0.6):
+def composite_overlay(mrc_bc, channels_bc, alpha_mrc=0.6, colors=None):
+    """Composite channels over the MRC.
+
+    `colors` is an optional per-channel list of RGB tuples; a None entry means
+    "leave this channel out" (role 'off', or reflection when building the
+    fluorescence composite). Without it, the legacy positional palette is used.
+    """
     rgb = np.empty(mrc_bc.shape + (3,), dtype=np.float32)
     np.multiply(mrc_bc, alpha_mrc, out=rgb[..., 0])
     rgb[..., 1] = rgb[..., 0]; rgb[..., 2] = rgb[..., 0]
     for idx, ch in enumerate(channels_bc):
-        col = CHANNEL_COLORS[idx % len(CHANNEL_COLORS)]
+        if colors is not None:
+            col = colors[idx] if idx < len(colors) else None
+        else:
+            col = CHANNEL_COLORS[idx % len(CHANNEL_COLORS)]
+        if col is None:
+            continue
         a = ch; oma = 1.0 - a
         for ci, cv in enumerate(col):
             np.multiply(rgb[..., ci], oma, out=rgb[..., ci])
@@ -253,23 +377,59 @@ class ChannelBCPanel(ttk.Frame):
     def __init__(self, parent, **kw):
         super().__init__(parent, **kw)
         self._rows = []
+        self._role_vars = []
+        self._swatches = []
 
-    def build(self, n_channels, callback):
+    def build(self, n_channels, callback, roles=None, on_role_change=None):
         for w in self.winfo_children():
             w.destroy()
         self._rows = []
+        self._role_vars = []
+        self._swatches = []
         for c in range(n_channels):
-            name = CHANNEL_COLOR_NAMES[c % len(CHANNEL_COLOR_NAMES)]
-            hex_ = CHANNEL_HEX[c % len(CHANNEL_HEX)]
+            role = roles[c] if (roles and c < len(roles)) else default_role(c)
+            var = tk.StringVar(value=role)
             hdr = ttk.Frame(self); hdr.pack(fill="x", pady=(4, 0))
-            tk.Label(hdr, text="  ", bg=hex_, width=2).pack(side="left", padx=(2, 4))
-            ttk.Label(hdr, text=f"Ch {c}  ({name})", style="Sm.TLabel").pack(side="left")
+            sw = tk.Label(hdr, text="  ", bg=ROLE_HEX.get(role, "#555555"), width=2)
+            sw.pack(side="left", padx=(2, 4))
+            ttk.Label(hdr, text=f"Ch {c}", style="Sm.TLabel").pack(side="left")
+            combo = ttk.Combobox(hdr, textvariable=var, values=list(CHANNEL_ROLES),
+                                 width=10, state="readonly")
+            combo.pack(side="left", padx=(6, 0))
+
+            def _role_changed(_evt=None, c=c):
+                self._swatches[c].configure(
+                    bg=ROLE_HEX.get(self._role_vars[c].get(), "#555555"))
+                if on_role_change is not None:
+                    on_role_change(c)
+
+            combo.bind("<<ComboboxSelected>>", _role_changed)
             bc = BCControls(self, callback=lambda c=c: callback(c))
             bc.pack(fill="x", padx=4)
             self._rows.append(bc)
+            self._role_vars.append(var)
+            self._swatches.append(sw)
 
     def bc(self, idx):
         return self._rows[idx] if 0 <= idx < len(self._rows) else None
+
+    def role(self, idx):
+        return self._role_vars[idx].get() if 0 <= idx < len(self._role_vars) else "off"
+
+    def roles(self):
+        return [v.get() for v in self._role_vars]
+
+    def colors(self):
+        """Per-channel RGB, None where the role contributes nothing."""
+        return [role_rgb(v.get()) for v in self._role_vars]
+
+    def composite_colors(self):
+        """Per-channel RGB for the fluorescence composite; reflection excluded."""
+        return [role_rgb(v.get()) if is_composite_role(v.get()) else None
+                for v in self._role_vars]
+
+    def indices_with_role(self, role):
+        return [i for i, v in enumerate(self._role_vars) if v.get() == role]
 
     @property
     def n_channels(self): return len(self._rows)
@@ -290,7 +450,8 @@ class StagePickerWindow(tk.Toplevel):
 
     def __init__(self, parent, clem_picker, mrc_reader, mrc_gray_true, channels_gray_true,
                  channel_names, warp_slice_true=None, n_z=1, site_data=None,
-                 title="Stage Position Picker"):
+                 title="Stage Position Picker", channel_roles=None,
+                 warp_crop_true=None):
         super().__init__(parent)
         self.title(title); self.configure(bg=BG)
         self.clem_picker = clem_picker
@@ -307,7 +468,14 @@ class StagePickerWindow(tk.Toplevel):
         self._mrc_true = mrc_gray_true              # TRUE montage
         self._chan_true = list(channels_gray_true)  # TRUE-frame warped channels
         self._chan_names = list(channel_names)
+        # Roles drive the colours here too, so the picker matches the overlay.
+        # Falls back to positional defaults when the caller doesn't pass any.
+        self._chan_roles = (list(channel_roles) if channel_roles is not None
+                            else [default_role(i) for i in range(len(self._chan_true))])
         self._warp_slice_true = warp_slice_true     # (c,z) -> TRUE-frame full-res warp
+        # (c,z,x0,y0,cw) -> TRUE-frame crop; avoids warping the whole montage
+        # per channel per z when only small windows are needed.
+        self._warp_crop_true = warp_crop_true
         self._n_z = max(1, int(n_z))
         self._H, self._W = self._mrc_true.shape[:2]
         self._view_target = 2000
@@ -360,33 +528,28 @@ class StagePickerWindow(tk.Toplevel):
 
         btn = ttk.Frame(side); btn.grid(row=2, column=0, sticky="ew", pady=(2, 4))
         btn.columnconfigure(0, weight=1); btn.columnconfigure(1, weight=1)
-        fov = ttk.Frame(btn); fov.grid(row=0, column=0, columnspan=2, sticky="ew")
 
+        # One crop FOV for everything: the crop export below and the paceTomo
+        # reference crops further down both read this box.
+        fov = ttk.Frame(btn); fov.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(fov, text="Crop FOV (um):", style="Sm.TLabel").pack(side="left")
+        self._crop_fov_var = tk.StringVar(value="2.0")
+        ttk.Entry(fov, textvariable=self._crop_fov_var, width=6).pack(side="left", padx=(4, 0))
+
+        ttk.Button(btn, text="Export", style="Accent.TButton",
+                   command=self._export).grid(row=1, column=0, columnspan=2,
+                                              sticky="ew", pady=(4, 4))
 
         ttk.Button(btn, text="Remove last", style="Danger.TButton",
                    command=self._remove_last).grid(row=2, column=0, sticky="ew", padx=(0, 2))
         ttk.Button(btn, text="Clear all", style="Danger.TButton",
                    command=self._clear).grid(row=2, column=1, sticky="ew", padx=(2, 0))
 
-        # ---- paceTomo grouping / xg1 export (grouping + reference crops + nav) ----
-        ttk.Separator(btn, orient="horizontal").grid(row=3, column=0, columnspan=2,
-                                                     sticky="ew", pady=(6, 4))
-        ttk.Label(btn, text="paceTomo Export:", foreground=CYA,
-                  font=("Segoe UI", 9, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 2))
-        radius_row = ttk.Frame(btn); radius_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 2))
-        ttk.Label(radius_row, text="Group radius (um):", style="Sm.TLabel").pack(side="left")
-        self._radius_var = tk.StringVar(value="7.5")
-        ttk.Entry(radius_row, textvariable=self._radius_var, width=6).pack(side="left", padx=(4, 0))
-        cropfov_row = ttk.Frame(btn); cropfov_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 2))
-        ttk.Label(cropfov_row, text="Crop FOV (um):", style="Sm.TLabel").pack(side="left")
-        self._crop_fov_var = tk.StringVar(value="2.0")
-        ttk.Entry(cropfov_row, textvariable=self._crop_fov_var, width=6).pack(side="left", padx=(4, 0))
-
-        ttk.Button(btn, text="Group picks & Export xg1", style="Accent.TButton",
-                   command=self._group_and_export_xg1).grid(row=8, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        self._groups_status = tk.StringVar(value="")
-        ttk.Label(btn, textvariable=self._groups_status, style="Sm.TLabel", foreground=BG3,
-                  wraplength=255, justify="left").grid(row=9, column=0, columnspan=2, sticky="ew")
+        self._export_status = tk.StringVar(value="")
+        ttk.Label(btn, textvariable=self._export_status, style="Sm.TLabel",
+                  foreground=BG3, wraplength=255,
+                  justify="left").grid(row=3, column=0, columnspan=2,
+                                       sticky="ew", pady=(6, 0))
 
         tf = ttk.Frame(side); tf.grid(row=3, column=0, sticky="nsew", pady=(2, 0))
         tf.rowconfigure(0, weight=1); tf.columnconfigure(0, weight=1)
@@ -420,9 +583,12 @@ class StagePickerWindow(tk.Toplevel):
 
         self._chan_on, self._chan_bc = [], []
         for i in range(len(self._chan_true)):
+            role = self._chan_roles[i] if i < len(self._chan_roles) else default_role(i)
             name = self._chan_names[i] if i < len(self._chan_names) else f"ch{i}"
-            hex_ = CHANNEL_HEX[i % len(CHANNEL_HEX)]
-            on = tk.BooleanVar(value=True)
+            hex_ = ROLE_HEX.get(role, CHANNEL_HEX[i % len(CHANNEL_HEX)])
+            # Reflection is a reference channel: available, but off by default
+            # so the picker opens on the fluorescence view.
+            on = tk.BooleanVar(value=(role not in ("reflection", "off")))
             r = ttk.Frame(inner); r.pack(fill="x", pady=(4, 0))
             tk.Label(r, text="  ", bg=hex_, width=2).pack(side="left", padx=(2, 4))
             ttk.Checkbutton(r, text=f"Ch {i} ({name})", variable=on,
@@ -462,7 +628,9 @@ class StagePickerWindow(tk.Toplevel):
             if not self._chan_on[i].get():
                 continue
             a = apply_bc(L[rr].astype(np.float32), self._chan_bc[i].vmin, self._chan_bc[i].vmax)
-            col = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]; oma = 1.0 - a
+            role = self._chan_roles[i] if i < len(self._chan_roles) else default_role(i)
+            col = role_rgb(role) or CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
+            oma = 1.0 - a
             for k, cv in enumerate(col):
                 rgb[..., k] *= oma
                 if cv > 0:
@@ -525,119 +693,88 @@ class StagePickerWindow(tk.Toplevel):
         self._picks.clear(); self.clem_picker.clear_picks()
         self._refresh_tree(); self._redraw_points()
 
-    def _group_and_export_xg1(self):
-        """Group picks, write reference crops, register to the navigator, and
-        generate xg1 files -- all done by CLEMPicker.run_create_groups_for_pacetomo."""
-        if not self._picks:
-            messagebox.showwarning("No picks", "Add at least one pick before exporting.", parent=self)
-            return
-        if self.clem_picker is None:
-            messagebox.showerror("No CLEMPicker", "CLEMPicker was not provided.", parent=self)
-            return
-        try:
-            radius_um = float(self._radius_var.get())
-            if radius_um <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning("Invalid radius", "Enter a positive group radius (um).", parent=self)
-            return
-        try:
-            crop_fov = float(self._crop_fov_var.get())
-            if crop_fov <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning("Invalid crop FOV", "Enter a positive crop FOV (um).", parent=self)
-            return
-        output_folder = filedialog.askdirectory(parent=self, title="Choose output folder for xg1 files")
-        if not output_folder:
-            return
-        try:
-            self._status.set("Grouping picks...")
-            self.update_idletasks()
-            groups, xg1_files = self.clem_picker.run_create_groups_for_pacetomo(
-                                                    radius_um=radius_um, crop_fov=crop_fov, output_folder=output_folder,
-                                                    warp_slice=self._warp_slice_true,
-                                                    n_channels=len(self._chan_true), n_z=self._n_z)
-            if not groups:
-                messagebox.showwarning("No groups", "Grouping produced no groups.", parent=self)
-                return
-            self._draw_groups_on_canvas(groups)
-            total = sum(len(g.picks) for g in groups)
-            self._groups_status.set(f"Created {len(groups)} group(s) from {total} pick(s).\n"
-                                    f"xg1 files saved to: {output_folder}")
-            self._status.set(f"Done! {len(groups)} group(s), {len(xg1_files)} xg1 file(s).")
-            flist = "\n".join(f"  - {os.path.basename(f)}" for f in xg1_files[:5])
-            if len(xg1_files) > 5:
-                flist += f"\n  ... (+{len(xg1_files) - 5} more)"
-            messagebox.showinfo("Export complete",
-                f"Grouped {total} pick(s) into {len(groups)} group(s).\n\n"
-                f"Generated {len(xg1_files)} xg1 file(s) in:\n{output_folder}\n\n{flist}", parent=self)
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            messagebox.showerror("Group/Export error", f"An error occurred:\n{str(e)}", parent=self)
-
-    def _draw_groups_on_canvas(self, groups):
-        """Draw group circles + tracking-target stars (in the display frame)."""
-        if not hasattr(self, "_group_artists"):
-            self._group_artists = []
-        for a in self._group_artists:
-            try: a.remove()
-            except Exception: pass
-        self._group_artists = []
-        colors = ['#00FF00', '#FF00FF', '#FFFF00', '#00FFFF', '#FF8800', '#88FF00', '#0088FF', '#FF0088']
-        for i, group in enumerate(groups):
-            color = colors[i % len(colors)]
-            for pick in group.picks:
-                dx, dy = self.clem_picker.convert_montage_to_display_orientation(
-                    pick.image_coord_x, pick.image_coord_y)
-                c = self._ax.plot(dx, dy, "o", markersize=20, markerfacecolor="none",
-                                  markeredgecolor=color, markeredgewidth=2, zorder=4)
-                self._group_artists.extend(c)
-                t = self._ax.text(dx + 15, dy + 15, f"G{group.group_id}", color=color,
-                                  fontsize=8, fontweight="bold", zorder=5)
-                self._group_artists.append(t)
-            tgt = group.tracking
-            dx, dy = self.clem_picker.convert_montage_to_display_orientation(
-                tgt.image_coord_x, tgt.image_coord_y)
-            star = self._ax.plot(dx, dy, "*", markersize=15, markerfacecolor=color,
-                                 markeredgecolor="white", markeredgewidth=1, zorder=6)
-            self._group_artists.extend(star)
-        self._canvas.draw_idle()
+    def _picks_dir(self):
+        """<site folder>/picks -- where the paceTomo export writes too."""
+        root = getattr(self.clem_picker, "site_output_root", None)
+        if root is None and self.site_data is not None:
+            root = self.site_data.path
+        if root is None:
+            root = os.path.dirname(self.clem_picker.mrc_dataclass.mrc_path)
+        return os.path.join(str(root), "picks")
 
     def _export(self):
+        """Export the picks. Four steps, no dialogs:
+
+          1. return the coordinates to SerialEM as navigator points, noted
+             "<site>_pick_<n>";
+          2. write one MRC crop per pick;
+          3. write one multichannel TIFF overlay per pick;
+          4. save a screenshot of the picker view.
+
+        Crops use the crop FOV entered above. Everything lands in <site>/picks.
+        """
         if not self._picks:
-            messagebox.showwarning("Nothing to export", "Pick at least one point.", parent=self)
+            messagebox.showwarning("Nothing to export", "Pick at least one point.",
+                                   parent=self)
             return
-        fov = None
-        if self._fov_var.get().strip():
-            try:
-                fov = float(self._fov_var.get())
-                if fov <= 0:
-                    raise ValueError
-            except ValueError:
-                messagebox.showwarning("FOV width", "Enter a positive number.", parent=self)
-                return
-        path = filedialog.asksaveasfilename(
-            parent=self, title="Export stage positions", defaultextension=".txt",
-            filetypes=[("Tab-separated text", "*.txt"), ("All files", "*")])
-        if not path:
+        if self.clem_picker is None:
+            messagebox.showerror("No CLEMPicker", "CLEMPicker was not provided.",
+                                 parent=self)
             return
         try:
-            self.clem_picker.export_stage_positions(self._picks, path)
-            root, _ = os.path.splitext(path)
-            self._fig.savefig(root + "_screenshot.png", dpi=150,
-                              facecolor=self._fig.get_facecolor(), bbox_inches="tight")
-            crop_msg = ""
-            if fov is not None and self._warp_slice_true is not None:
-                res = self.mrc_reader.write_fov_crops(
-                    site_data=self.site_data, warp_slice=self._warp_slice_true, n_channels=len(self._chan_true), n_z=self._n_z, fov_um=fov, output_root=root)
-                crop_msg = f"\n\n{len(res['tif'])} tif + {len(res['mrc'])} mrc crop(s) written."
-            elif fov is not None:
-                crop_msg = "\n\nFOV crops skipped (channel data unavailable)."
-            messagebox.showinfo("Exported", f"Saved {len(self._picks)} point(s):\n{path}{crop_msg}",
-                                parent=self)
+            fov = float(self._crop_fov_var.get())
+            if fov <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Crop FOV",
+                                   "Enter a positive crop FOV in micrometres.",
+                                   parent=self)
+            return
+
+        picks_dir = self._picks_dir()
+        site_label = getattr(self.clem_picker, "site_id", None)
+        done = []
+        try:
+            os.makedirs(picks_dir, exist_ok=True)
+
+            # 1. coordinates back to SerialEM
+            self._status.set(f"Registering {len(self._picks)} pick(s) in the navigator...")
+            self.update_idletasks()
+            nav_idx = self.clem_picker.add_picks_to_navigator(
+                self.clem_picker.mrc_dataclass, buffer=self.clem_picker.nav_map_buffer,
+                site_label=site_label)
+            n_nav = len(nav_idx or [])
+            done.append(f"{n_nav} navigator point(s)"
+                        + (f' noted "{site_label}_pick_N"' if site_label else ""))
+
+            # 2 + 3. MRC crops and multichannel TIFF overlays
+            self._status.set(f"Writing crops for {len(self._picks)} pick(s)...")
+            self.update_idletasks()
+            res = self.mrc_reader.write_fov_crops(
+                mrc_dataclass=self.clem_picker.mrc_dataclass,
+                warp_slice=self._warp_slice_true,
+                warp_crop=self._warp_crop_true,
+                n_channels=len(self._chan_true), n_z=self._n_z,
+                fov_um=fov, picks_dir=picks_dir)
+            done.append(f"{len(res['mrc'])} MRC crop(s)")
+            done.append(f"{len(res['tif'])} TIFF overlay(s) at {fov} um")
+
+            # 4. screenshot of the picks
+            shot = os.path.join(picks_dir, "picker_screenshot.png")
+            self._fig.savefig(shot, dpi=150, facecolor=self._fig.get_facecolor(),
+                              bbox_inches="tight")
+            done.append(f"screenshot {os.path.basename(shot)}")
+
+            summary = "\n".join(f"  - {d}" for d in done)
+            self._export_status.set(f"Exported to {picks_dir}")
+            self._status.set("Export complete.")
+            messagebox.showinfo("Export complete",
+                                f"Written to:\n{picks_dir}\n\n{summary}", parent=self)
         except Exception as e:
             import traceback; traceback.print_exc()
+            self._status.set("Export failed.")
+            self._export_status.set(
+                "Export failed" + (f" after: {', '.join(done)}" if done else "."))
             messagebox.showerror("Export error", str(e), parent=self)
 
 
@@ -647,13 +784,19 @@ class StagePickerWindow(tk.Toplevel):
 
 class RegistrationApp(tk.Tk):
 
-    def __init__(self, mrc_reader, site_data, tem_communication):
+    def __init__(self, mrc_reader, site_data, tem_communication,
+                 reuse_transform=False):
         super().__init__()
         self.mrc_reader = mrc_reader
         self.tem = tem_communication
         self.correlator = CLEMCorrelator(mrc_reader=self.mrc_reader)
         self.site_data = site_data
         self.site_id = self.site_data.site_id
+        # When True, startup re-applies the newest transform stored under
+        # <site>/transforms and locks the flip checkboxes to that orientation.
+        # Off by default: a normal run should start from a clean slate, and
+        # only a deliberate restart of the alignment stage should reuse a fit.
+        self.reuse_transform = bool(reuse_transform)
         self.title("MRC / OME-TIFF Registration Tool")
         self.configure(bg=BG)
         self.minsize(1150, 820)
@@ -955,7 +1098,12 @@ class RegistrationApp(tk.Tk):
         self.z_spin.config(to=max(0, Z - 1)); self.z_var.set(0)
         self.flip_x.set(TIFF_FLIP_X_DEFAULT); self.flip_y.set(TIFF_FLIP_Y_DEFAULT)
         self._sync_flip_to_mrc()
-        self.bc_tiff_panel.build(C, self._on_bc_tiff)
+        # Keep the operator's role assignments when reloading a stack with the
+        # same channel count; otherwise fall back to the positional defaults.
+        prev_roles = self.bc_tiff_panel.roles()
+        keep = prev_roles if len(prev_roles) == C else None
+        self.bc_tiff_panel.build(C, self._on_bc_tiff, roles=keep,
+                                 on_role_change=self._on_channel_role_change)
         src_path = getattr(data, "ome_path", None) or getattr(data, "czi_path", None)
         label = os.path.basename(os.fspath(src_path)) if src_path else "image"
         self.tiff_info_var.set(label + "  " + (getattr(data, "info", "") or ""))
@@ -1134,6 +1282,35 @@ class RegistrationApp(tk.Tk):
         if bc and imgs:
             imgs[0].set_clim(bc.vmin, bc.vmax); self.canvas_tiff.draw_idle()
 
+    def _on_channel_role_change(self, channel_idx):
+        """A channel was reassigned to a different role.
+
+        The single-channel TIFF preview is greyscale, so nothing on the main
+        window needs repainting; the roles are read when an overlay is built.
+        """
+        role = self.bc_tiff_panel.role(channel_idx)
+        self.status_var.set(f"Ch {channel_idx} set to '{role}'. "
+                            f"Rebuild the overlay to see it.")
+
+    # ---- channel roles ---------------------------------------------------- #
+
+    def channel_roles(self):
+        return self.bc_tiff_panel.roles()
+
+    def _composite_colors(self):
+        """Colours for the fluorescence composite (reflection/off excluded)."""
+        colors = self.bc_tiff_panel.composite_colors()
+        n = len(self.warped_channels)
+        return (colors + [None] * n)[:n]
+
+    def _reflection_indices(self):
+        return [i for i in self.bc_tiff_panel.indices_with_role("reflection")
+                if i < len(self.warped_channels)]
+
+    def _role_label(self, idx):
+        role = self.bc_tiff_panel.role(idx) if idx < self.bc_tiff_panel.n_channels else "off"
+        return role
+
     # ---------------- loading ----------------
 
     def _resolve_picked_mrc_path(self, path):
@@ -1215,13 +1392,22 @@ class RegistrationApp(tk.Tk):
         if mrc_dc is not None and getattr(mrc_dc, "mrc_path", None):
             self.tem.load_mrc_in_nav(mrc_dataclass=mrc_dc, buffer='S')
         # Startup auto re-apply if a stored transform exists for this site.
+        # Opt-in via RegistrationApp(..., reuse_transform=True) -- used when
+        # restarting the alignment stage on a site that was already fitted.
         record = None
-        finder = getattr(self.mrc_reader, "_find_latest_transform", None)
-        if callable(finder):
-            try:
-                record = finder(self.site_id)
-            except Exception:
-                record = None
+        if self.reuse_transform:
+            finder = getattr(self.mrc_reader, "_find_latest_transform", None)
+            if callable(finder):
+                try:
+                    # The finder returns a path; the correlator parses it into
+                    # a TransformRecord (yaml / csv / legacy txt).
+                    path = finder(self.site_data)
+                    if path is not None:
+                        record = self.correlator.load_transform(os.fspath(path))
+                        print(f"[INFO] Reusing stored transform: {path}")
+                except Exception:
+                    import traceback; traceback.print_exc()
+                    record = None
         if record is not None and self.tiff_stack is not None:
             self._loaded_record = record
             self.flip_x.set(bool(record.flip_x))
@@ -1606,6 +1792,8 @@ class RegistrationApp(tk.Tk):
             messagebox.showwarning("No data", "Apply a transform first."); return
 
         C = len(self.warped_channels)
+        roles = self.channel_roles()
+
         # everything here is in the DISPLAY-MRC frame already; show directly
         mrc_disp = apply_bc(_mrc_to_display(_fast_ds(self.mrc_image)), self.bc_mrc.vmin, self.bc_mrc.vmax)
         chs_disp = []
@@ -1613,10 +1801,17 @@ class RegistrationApp(tk.Tk):
             bc = self.bc_tiff_panel.bc(idx)
             vmin, vmax = (bc.vmin, bc.vmax) if bc else (0.0, 1.0)
             chs_disp.append(apply_bc(_fast_ds(ch), vmin, vmax))
-        per_ch = [composite_overlay(mrc_disp, [ch]) for ch in chs_disp]
-        full = composite_overlay(mrc_disp, chs_disp)
 
-        ncols = C + 2
+        # Panels, in order: MRC | TEM+reflection | one per fluorescence channel
+        # | full composite. The plan is shared with the save path below so the
+        # files always match what is on screen.
+        plan = overlay_panel_plan(roles, C)
+        panels = [(mrc_disp if colors is None
+                   else composite_overlay(mrc_disp, chs_disp, colors=colors),
+                   title, is_gray)
+                  for title, colors, is_gray in plan]
+
+        ncols = len(panels)
         win = tk.Toplevel(self); win.title("Overlay result"); win.configure(bg=BG); win.minsize(600, 350)
         fig = Figure(figsize=(3.6 * ncols, 4.4), facecolor=BG)
         axes = [fig.add_subplot(1, ncols, i + 1) for i in range(ncols)]
@@ -1625,11 +1820,12 @@ class RegistrationApp(tk.Tk):
         def sa(ax, t):
             ax.set_facecolor(BG); ax.set_title(t, color=CYA, fontsize=8, pad=4); ax.axis("off")
 
-        axes[0].imshow(mrc_disp, cmap="gray", origin="upper", vmin=0, vmax=1); sa(axes[0], "MRC (reference)")
-        for idx, img in enumerate(per_ch):
-            name = CHANNEL_COLOR_NAMES[idx % len(CHANNEL_COLOR_NAMES)]
-            axes[idx + 1].imshow(img, origin="upper"); sa(axes[idx + 1], f"MRC + Ch {idx} ({name})")
-        axes[-1].imshow(full, origin="upper"); sa(axes[-1], "Full composite")
+        for ax, (img, title, is_gray) in zip(axes, panels):
+            if is_gray:
+                ax.imshow(img, cmap="gray", origin="upper", vmin=0, vmax=1)
+            else:
+                ax.imshow(img, origin="upper")
+            sa(ax, title)
 
         canvas = FigureCanvasTkAgg(fig, master=win); canvas.get_tk_widget().pack(fill="both", expand=True)
         canvas.draw()
@@ -1651,7 +1847,7 @@ class RegistrationApp(tk.Tk):
             mrc_summary.flip_y = MRCReader.MONTAGE_FLIP_Y
             clem_picker = CLEMPicker(mrc_summary, self.tem, site_data=self.site_data)
 
-            names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)] for i in range(len(self.warped_channels))]
+            names = list(roles[:len(self.warped_channels)])
             n_z = self.site_data.tiff.num_z_slices if self.site_data.tiff is not None else 1
 
             # picker works in TRUE frame: un-flip the display-MRC arrays once
@@ -1664,9 +1860,28 @@ class RegistrationApp(tk.Tk):
                                                   self.mrc_image.shape, flip_x=fx, flip_y=fy)
                 return _mrc_display_to_true_2d(disp)
 
+            def warp_crop_true(c, z, x0, y0, cw):
+                """One (channel, z) slice warped straight into a cw x cw window
+                at (x0, y0) in TRUE montage pixels -- same result as cropping
+                warp_slice_true, without warping the whole montage first.
+
+                The montage is drawn flipped, so the TRUE window becomes this
+                DISPLAY window; deriving it from the true origin (not the
+                rounded centre) keeps the two paths exactly aligned.
+                """
+                H, W = self.mrc_image.shape[:2]
+                dx0 = (W - cw - x0) if MRCReader.MONTAGE_FLIP_X else x0
+                dy0 = (H - cw - y0) if MRCReader.MONTAGE_FLIP_Y else y0
+                crop = self.correlator.warp_crop(
+                    self.tiff_stack, c, z, self._last_tform, dx0, dy0, cw,
+                    flip_x=fx, flip_y=fy, mrc_shape=self.mrc_image.shape)
+                return _mrc_display_to_true_2d(crop)
+
             StagePickerWindow(win, clem_picker=clem_picker, mrc_reader=self.mrc_reader,
                               mrc_gray_true=mrc_true, channels_gray_true=chans_true,
-                              channel_names=names, warp_slice_true=warp_slice_true, n_z=n_z,
+                              channel_names=names, channel_roles=list(roles),
+                              warp_slice_true=warp_slice_true,
+                              warp_crop_true=warp_crop_true, n_z=n_z,
                               site_data=self.site_data, title="Stage Position Picker")
 
         ttk.Button(btns, text="Open Stage Picker", style="Mont.TButton",
@@ -1692,28 +1907,26 @@ class RegistrationApp(tk.Tk):
                 out = root + sfx + ext
                 if use_png:
                     from PIL import Image
-                    Image.fromarray(to_u8(arr)).save(out)
+                    Image.fromarray(to_u8(arr)).save(out)   # PNG is deflate already
                 elif arr.ndim == 2:
-                    tifffile.imwrite(out, (np.clip(arr, 0, 1) * 65535).astype(np.uint16), photometric="minisblack")
+                    tiff_write(out, (np.clip(arr, 0, 1) * 65535).astype(np.uint16), photometric="minisblack")
                 else:
-                    tifffile.imwrite(out, to_u8(arr), photometric="rgb")
+                    tiff_write(out, to_u8(arr), photometric="rgb")
                 return os.path.basename(out)
 
             try:
                 saved = []
                 mrc_bc = apply_bc(_mrc_to_display(self.mrc_image), self.bc_mrc.vmin, self.bc_mrc.vmax)
-                saved.append(write_panel("_01_mrc", mrc_bc))
-                for i, ch in enumerate(self.warped_channels):
-                    bc = self.bc_tiff_panel.bc(i)
-                    vmin, vmax = (bc.vmin, bc.vmax) if bc else (0.0, 1.0)
-                    comp = composite_overlay(mrc_bc, [apply_bc(ch, vmin, vmax)])
-                    nm = CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)]
-                    saved.append(write_panel(f"_0{i+2}_mrc_ch{i}_{nm}", comp))
+                # Full-resolution versions of the panels shown on screen.
                 full_bc = [apply_bc(ch, *((self.bc_tiff_panel.bc(i).vmin, self.bc_tiff_panel.bc(i).vmax)
                                           if self.bc_tiff_panel.bc(i) else (0.0, 1.0)))
                            for i, ch in enumerate(self.warped_channels)]
-                comp_full = composite_overlay(mrc_bc, full_bc)
-                saved.append(write_panel(f"_{C+2:02d}_full_composite", comp_full))
+
+                # Same plan as the figure, at full resolution.
+                for n, (title, colors, _is_gray) in enumerate(plan, start=1):
+                    img = (mrc_bc if colors is None
+                           else composite_overlay(mrc_bc, full_bc, colors=colors))
+                    saved.append(write_panel(f"_{n:02d}_{_panel_slug(title)}", img))
                 messagebox.showinfo("Saved", f"{len(saved)} file(s) written:\n" + "\n".join(saved))
             except Exception as e:
                 messagebox.showerror("Save error", str(e))
@@ -1729,6 +1942,9 @@ if __name__ == "__main__":
                         help="Site folder (MRC/mdoc, TIFF/CZI). Omit to open a chooser.")
     parser.add_argument("--coord-key", default="AlignedPieceCoordsVS")
     parser.add_argument("--milling-angle", type=float, default=0.0)
+    parser.add_argument("--reuse-transform", action="store_true",
+                        help="Re-apply the newest transform saved under "
+                             "<site>/transforms on startup (locks the flips).")
     args = parser.parse_args()
 
     site_folder = args.site_folder
@@ -1747,5 +1963,6 @@ if __name__ == "__main__":
     site_data = SiteDataSummary(site_id=os.path.basename(site_folder),
                                 path=site_folder, milling_angle=args.milling_angle)
     RegistrationApp(mrc_reader=mrc_reader, site_data=site_data,
-                    tem_communication=tem).mainloop()
+                    tem_communication=tem,
+                    reuse_transform=args.reuse_transform).mainloop()
 

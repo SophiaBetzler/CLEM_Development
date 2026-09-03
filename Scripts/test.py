@@ -89,6 +89,112 @@ CHANNEL_COLORS = [
 ]
 CHANNEL_COLOR_NAMES = ["green","magenta","cyan","yellow","orange","purple"]
 
+# ---------------------------------------------------------------------------
+# Channel roles
+# ---------------------------------------------------------------------------
+# Channels are assigned roles rather than colours-by-position, because not every
+# dataset carries every channel. The default is positional (ch0 reflection, then
+# red, green, blue) and can be overridden per channel from the dropdown in the
+# Brightness/Contrast panel.
+#
+# "reflection" is a reference channel, not a fluorophore: it is EXCLUDED from
+# the fluorescence composite and instead gets its own TEM + reflection overlay,
+# drawn in green.
+CHANNEL_ROLES = ("reflection", "red", "green", "blue", "off")
+
+ROLE_RGB = {"reflection": (0., 1., 0.),      # green, in its own overlay only
+            "red":        (1., 0., 0.),
+            "green":      (0., 1., 0.),
+            "blue":       (0., 0., 1.),
+            "off":        None}
+
+ROLE_HEX = {"reflection": "#00ff00", "red": "#ff0000", "green": "#00ff00",
+            "blue": "#0000ff", "off": "#555555"}
+
+DEFAULT_ROLE_ORDER = ("reflection", "red", "green", "blue")
+COMPOSITE_ROLES = ("red", "green", "blue")
+
+
+def default_role(idx):
+    """Positional default for channel `idx`; anything beyond blue starts off."""
+    return DEFAULT_ROLE_ORDER[idx] if idx < len(DEFAULT_ROLE_ORDER) else "off"
+
+
+def role_rgb(role):
+    return ROLE_RGB.get(role)
+
+
+def is_composite_role(role):
+    return role in COMPOSITE_ROLES
+
+
+# Compression for saved overlay panels. "zlib" (deflate) is lossless and
+# readable by ImageJ/Fiji, tifffile and bioformats without extra packages. Set
+# to None to write uncompressed; "lzw" is an alternative, and "zstd" is faster
+# and smaller but needs the imagecodecs package.
+TIFF_COMPRESSION = "zlib"
+
+
+def tiff_write(path, data, **kwargs):
+    """tifffile.imwrite with compression, tolerating tifffile API differences.
+
+    Newer tifffile takes compression=; older versions took compress=; and a
+    codec may be unavailable, as is compression itself for ImageJ hyperstacks.
+    Any of those falls back to uncompressed rather than losing the save.
+    """
+    if TIFF_COMPRESSION:
+        for kw in ("compression", "compress"):
+            try:
+                return tifffile.imwrite(path, data, **{kw: TIFF_COMPRESSION}, **kwargs)
+            except TypeError:
+                continue            # this tifffile doesn't take that keyword
+            except ValueError:
+                break               # keyword is fine, codec/format is not
+    return tifffile.imwrite(path, data, **kwargs)
+
+
+def overlay_panel_plan(roles, n_channels):
+    """Which overlay panels to build for a given set of channel roles.
+
+    Returns a list of (title, colors, is_gray). `colors` is the per-channel
+    colour list to hand to composite_overlay -- None entries drop that channel
+    -- or None for the plain MRC panel.
+
+    Copes with stacks that carry only some of the channels: a role that is not
+    present simply produces no panel.
+    """
+    roles = list(roles)[:n_channels]
+    roles += ["off"] * (n_channels - len(roles))
+
+    plan = [("MRC (reference)", None, True)]
+
+    refl = [i for i, r in enumerate(roles) if r == "reflection"]
+    if refl:
+        plan.append(("TEM + reflection (green)",
+                     [role_rgb("reflection") if i in refl else None
+                      for i in range(n_channels)],
+                     False))
+
+    comp = [role_rgb(r) if is_composite_role(r) else None for r in roles]
+    for i, col in enumerate(comp):
+        if col is None:
+            continue
+        plan.append((f"MRC + Ch {i} ({roles[i]})",
+                     [col if k == i else None for k in range(n_channels)],
+                     False))
+
+    if sum(c is not None for c in comp) > 1:
+        plan.append(("Full composite", comp, False))
+    return plan
+
+
+def _panel_slug(title):
+    """Filename-safe suffix for a panel title."""
+    out = title.lower()
+    for a, b in ((" + ", "_"), (" ", "_"), ("(", ""), (")", "")):
+        out = out.replace(a, b)
+    return out
+
 PT_MRC  = "#FF4444"
 PT_TIFF = "#44AAFF"
 ZOOM_FACTOR = 1.25
@@ -233,13 +339,24 @@ def colorize(img2d, color):
     rgba[...,2]=img2d*color[2]; rgba[...,3]=img2d
     return rgba
 
-def composite_overlay(mrc_bc, channels_bc, alpha_mrc=0.6, alpha_ch=1.0):
+def composite_overlay(mrc_bc, channels_bc, alpha_mrc=0.6, alpha_ch=1.0, colors=None):
+    """Composite channels over the MRC.
+
+    `colors` is an optional per-channel list of RGB tuples; a None entry means
+    "leave this channel out" (role 'off', or reflection when building the
+    fluorescence composite). Without it, the legacy positional palette is used.
+    """
     rgb = np.empty(mrc_bc.shape + (3,), dtype=np.float32)
     np.multiply(mrc_bc, alpha_mrc, out=rgb[..., 0])
     rgb[..., 1] = rgb[..., 0]
     rgb[..., 2] = rgb[..., 0]
     for idx, ch in enumerate(channels_bc):
-        col = CHANNEL_COLORS[idx % len(CHANNEL_COLORS)]
+        if colors is not None:
+            col = colors[idx] if idx < len(colors) else None
+        else:
+            col = CHANNEL_COLORS[idx % len(CHANNEL_COLORS)]
+        if col is None:
+            continue
         a   = ch if alpha_ch == 1.0 else (ch * alpha_ch).astype(np.float32)
         oma = 1.0 - a
         for ci, cv in enumerate(col):
@@ -466,22 +583,54 @@ class ChannelBCPanel(ttk.Frame):
     def __init__(self, parent, **kw):
         super().__init__(parent, **kw)
         self._rows = []
+        self._role_vars = []
+        self._swatches = []
 
-    def build(self, n_channels, callback):
+    def build(self, n_channels, callback, roles=None, on_role_change=None):
         for w in self.winfo_children(): w.destroy()
         self._rows = []
+        self._role_vars = []
+        self._swatches = []
         for c in range(n_channels):
-            name = CHANNEL_COLOR_NAMES[c % len(CHANNEL_COLOR_NAMES)]
-            hex_ = CHANNEL_HEX[c % len(CHANNEL_HEX)]
+            role = roles[c] if (roles and c < len(roles)) else default_role(c)
+            var  = tk.StringVar(value=role)
             hdr  = ttk.Frame(self); hdr.pack(fill="x", pady=(4,0))
-            tk.Label(hdr, text="  ", bg=hex_, width=2).pack(side="left", padx=(2,4))
-            ttk.Label(hdr, text=f"Ch {c}  ({name})", style="Sm.TLabel").pack(side="left")
+            sw   = tk.Label(hdr, text="  ", bg=ROLE_HEX.get(role, "#555555"), width=2)
+            sw.pack(side="left", padx=(2,4))
+            ttk.Label(hdr, text=f"Ch {c}", style="Sm.TLabel").pack(side="left")
+            combo = ttk.Combobox(hdr, textvariable=var, values=list(CHANNEL_ROLES),
+                                 width=10, state="readonly")
+            combo.pack(side="left", padx=(6, 0))
+
+            def _role_changed(_evt=None, c=c):
+                self._swatches[c].configure(
+                    bg=ROLE_HEX.get(self._role_vars[c].get(), "#555555"))
+                if on_role_change is not None:
+                    on_role_change(c)
+
+            combo.bind("<<ComboboxSelected>>", _role_changed)
             bc = BCControls(self, callback=lambda c=c: callback(c))
             bc.pack(fill="x", padx=4)
             self._rows.append(bc)
+            self._role_vars.append(var)
+            self._swatches.append(sw)
 
     def bc(self, idx):
         return self._rows[idx] if 0 <= idx < len(self._rows) else None
+
+    def role(self, idx):
+        return self._role_vars[idx].get() if 0 <= idx < len(self._role_vars) else "off"
+
+    def roles(self):
+        return [v.get() for v in self._role_vars]
+
+    def composite_colors(self):
+        """Per-channel RGB for the fluorescence composite; reflection excluded."""
+        return [role_rgb(v.get()) if is_composite_role(v.get()) else None
+                for v in self._role_vars]
+
+    def indices_with_role(self, role):
+        return [i for i, v in enumerate(self._role_vars) if v.get() == role]
 
     def reset_all(self):
         for bc in self._rows: bc.reset()
@@ -526,7 +675,7 @@ class StagePickerWindow(tk.Toplevel):
     """
 
     def __init__(self, parent, mrc_gray, channels_gray, channel_names,
-                 pieces, pixel_spacing_um, tile_hw,
+                 pieces, pixel_spacing_um, tile_hw, channel_roles=None,
                  warp_slice=None, n_z=1, image_shift_um=(0.0, 0.0),
                  title="Stage Position Picker"):
         super().__init__(parent)
@@ -567,6 +716,9 @@ class StagePickerWindow(tk.Toplevel):
         self._mrc_full   = mrc_gray
         self._chan_full  = list(channels_gray)
         self._chan_names = list(channel_names)
+        # Roles drive the colours here too, so the picker matches the overlay.
+        self._chan_roles = (list(channel_roles) if channel_roles is not None
+                            else [default_role(i) for i in range(len(self._chan_full))])
 
         # For per-point FOV crops: callback (c, z) -> warped 2-D slice on the
         # MRC grid, and the number of z-planes in the fluorescence stack.
@@ -770,10 +922,13 @@ class StagePickerWindow(tk.Toplevel):
         self._chan_on = []
         self._chan_bc = []
         for i in range(len(self._chan_full)):
-            name = (self._chan_names[i] if i < len(self._chan_names)
-                    else CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)])
-            hex_ = CHANNEL_HEX[i % len(CHANNEL_HEX)]
-            on   = tk.BooleanVar(value=True)
+            role = (self._chan_roles[i] if i < len(self._chan_roles)
+                    else default_role(i))
+            name = (self._chan_names[i] if i < len(self._chan_names) else role)
+            hex_ = ROLE_HEX.get(role, CHANNEL_HEX[i % len(CHANNEL_HEX)])
+            # Reflection is a reference channel: available, but off by default
+            # so the picker opens on the fluorescence view.
+            on   = tk.BooleanVar(value=(role not in ("reflection", "off")))
             row  = ttk.Frame(inner); row.pack(fill="x", pady=(4, 0))
             tk.Label(row, text="  ", bg=hex_, width=2).pack(side="left",
                                                             padx=(2, 4))
@@ -839,7 +994,9 @@ class StagePickerWindow(tk.Toplevel):
                 continue
             a   = apply_bc(L[rr].astype(np.float32),
                            self._chan_bc[i].vmin, self._chan_bc[i].vmax)
-            col = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
+            role = (self._chan_roles[i] if i < len(self._chan_roles)
+                    else default_role(i))
+            col = role_rgb(role) or CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
             oma = 1.0 - a
             for k, cv in enumerate(col):
                 rgb[..., k] *= oma
@@ -1756,7 +1913,11 @@ class RegistrationApp(tk.Tk):
             self.z_var.set(0)
             self.flip_x.set(False)
             self.flip_y.set(False)
-            self.bc_tiff_panel.build(C, self._on_bc_tiff)
+            # Keep role assignments when reloading a stack with the same
+            # channel count; otherwise fall back to positional defaults.
+            prev_roles = self.bc_tiff_panel.roles()
+            keep = prev_roles if len(prev_roles) == C else None
+            self.bc_tiff_panel.build(C, self._on_bc_tiff, roles=keep)
             self.tiff_info_var.set(os.path.basename(path) + "  " + info)
             self._draw_tiff()
             self.status_var.set(
@@ -2348,10 +2509,18 @@ class RegistrationApp(tk.Tk):
             bc = self.bc_tiff_panel.bc(idx)
             vmin, vmax = (bc.vmin, bc.vmax) if bc else (0.0, 1.0)
             chs_disp.append(apply_bc(_fast_ds(ch), vmin, vmax))
-        per_ch_imgs = [composite_overlay(mrc_disp, [ch]) for ch in chs_disp]
-        full_img    = composite_overlay(mrc_disp, chs_disp)
+        # Panels, in order: MRC | TEM+reflection | one per fluorescence channel
+        # | full composite. Reflection is a reference channel, so it gets its
+        # own green overlay and is kept out of the composite. The plan is shared
+        # with save_overlay below, so the files always match what is on screen.
+        roles = self.bc_tiff_panel.roles()
+        plan  = overlay_panel_plan(roles, C)
+        panels = [(mrc_disp if colors is None
+                   else composite_overlay(mrc_disp, chs_disp, colors=colors),
+                   title, is_gray)
+                  for title, colors, is_gray in plan]
 
-        ncols = C + 2
+        ncols = len(panels)
         win   = tk.Toplevel(self)
         win.title("Overlay result"); win.configure(bg=BG); win.minsize(600,350)
 
@@ -2363,13 +2532,12 @@ class RegistrationApp(tk.Tk):
             ax.set_facecolor(BG); ax.set_title(t,color=CYA,fontsize=8,pad=4); ax.axis("off")
 
         # All panels are MRC-grid space -> mirror each for display (same flip).
-        axes[0].imshow(_flip_for_display(mrc_disp),cmap="gray",origin="upper",vmin=0,vmax=1)
-        sa(axes[0],"MRC (reference)")
-        for idx,img in enumerate(per_ch_imgs):
-            name = CHANNEL_COLOR_NAMES[idx%len(CHANNEL_COLOR_NAMES)]
-            axes[idx+1].imshow(_flip_for_display(img),origin="upper")
-            sa(axes[idx+1],f"MRC + Ch {idx}  ({name})")
-        axes[-1].imshow(_flip_for_display(full_img),origin="upper"); sa(axes[-1],"Full composite")
+        for ax, (img, title, is_gray) in zip(axes, panels):
+            if is_gray:
+                ax.imshow(_flip_for_display(img), cmap="gray", origin="upper", vmin=0, vmax=1)
+            else:
+                ax.imshow(_flip_for_display(img), origin="upper")
+            sa(ax, title)
 
         canvas = FigureCanvasTkAgg(fig,master=win)
         canvas.get_tk_widget().pack(fill="both",expand=True)
@@ -2397,7 +2565,7 @@ class RegistrationApp(tk.Tk):
             # Also hand it a callback to re-warp any (channel, z) slice onto the
             # grid plus the z-count, so it can write per-point FOV crops as
             # registered z-stacks (TEM + all channels x all z) to disk.
-            channel_names = [CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)]
+            channel_names = [roles[i] if i < len(roles) else default_role(i)
                              for i in range(C)]
             n_z = self.tiff_stack.shape[1] if self.tiff_stack is not None else 1
             StagePickerWindow(
@@ -2405,6 +2573,7 @@ class RegistrationApp(tk.Tk):
                 mrc_gray         = self.mrc_image,
                 channels_gray    = self.warped_channels,
                 channel_names    = channel_names,
+                channel_roles    = list(channel_names),
                 pieces           = self.mrc_current_pieces,
                 pixel_spacing_um = self.mrc_pixel_spacing_um,
                 tile_hw          = self.mrc_img_hw,
@@ -2447,11 +2616,11 @@ class RegistrationApp(tk.Tk):
                 out = root + sfx + ext
                 if use_png:
                     from PIL import Image
-                    Image.fromarray(to_u8(arr)).save(out)
+                    Image.fromarray(to_u8(arr)).save(out)   # PNG is deflate already
                 elif arr.ndim == 2:
-                    tifffile.imwrite(out, to_u16(arr), photometric="minisblack")
+                    tiff_write(out, to_u16(arr), photometric="minisblack")
                 else:
-                    tifffile.imwrite(out, to_u8(arr), photometric="rgb")
+                    tiff_write(out, to_u8(arr), photometric="rgb")
                 return os.path.basename(out)
 
             # Full-resolution panels are built HERE, on demand, one at a time,
@@ -2462,37 +2631,41 @@ class RegistrationApp(tk.Tk):
             try:
                 self.status_var.set("Saving overlay panels..."); self.update_idletasks()
                 saved = []
-                # 1) MRC reference (grayscale, full-res, brightness-corrected).
+                # MRC reference (grayscale, full-res, brightness-corrected).
                 mrc_bc = apply_bc(self.mrc_image, self.bc_mrc.vmin, self.bc_mrc.vmax)
-                saved.append(write_panel("_01_mrc", mrc_bc))
-                # 2) one MRC+channel composite per channel.
-                for i, ch in enumerate(self.warped_channels):
-                    bc = self.bc_tiff_panel.bc(i)
-                    vmin, vmax = (bc.vmin, bc.vmax) if bc else (0.0, 1.0)
-                    ch_bc = apply_bc(ch, vmin, vmax)
-                    comp  = composite_overlay(mrc_bc, [ch_bc])
-                    nm = CHANNEL_COLOR_NAMES[i % len(CHANNEL_COLOR_NAMES)]
-                    saved.append(write_panel(f"_0{i+2}_mrc_ch{i}_{nm}", comp))
-                    del ch_bc, comp
-                # 3) full composite, built incrementally: start from the MRC
-                # base and blend one brightness-corrected channel at a time, so
-                # we never hold all channels at once (only the RGB accumulator
-                # plus one channel).  This matches composite_overlay's result.
-                full_composite = composite_overlay(mrc_bc, [])   # gray base -> RGB
-                for i, ch in enumerate(self.warped_channels):
-                    bc = self.bc_tiff_panel.bc(i)
-                    vmin, vmax = (bc.vmin, bc.vmax) if bc else (0.0, 1.0)
-                    a   = apply_bc(ch, vmin, vmax)
-                    col = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
-                    oma = 1.0 - a
-                    for k, cv in enumerate(col):
-                        full_composite[..., k] *= oma
-                        if cv > 0:
-                            full_composite[..., k] += a * cv
-                    del a, oma
-                np.clip(full_composite, 0.0, 1.0, out=full_composite)
-                saved.append(write_panel(f"_{C+2:02d}_full_composite", full_composite))
-                del full_composite, mrc_bc
+
+                # Each composite is built incrementally: start from the MRC base
+                # and blend one brightness-corrected channel at a time, so we
+                # never hold all channels at once (only the RGB accumulator plus
+                # one channel).  Matches composite_overlay's result exactly.
+                def build_composite(colors):
+                    acc = composite_overlay(mrc_bc, [])   # gray base -> RGB
+                    for i, ch in enumerate(self.warped_channels):
+                        col = colors[i] if i < len(colors) else None
+                        if col is None:
+                            continue        # reflection in the composite, or 'off'
+                        bc = self.bc_tiff_panel.bc(i)
+                        vmin, vmax = (bc.vmin, bc.vmax) if bc else (0.0, 1.0)
+                        a   = apply_bc(ch, vmin, vmax)
+                        oma = 1.0 - a
+                        for k, cv in enumerate(col):
+                            acc[..., k] *= oma
+                            if cv > 0:
+                                acc[..., k] += a * cv
+                        del a, oma
+                    np.clip(acc, 0.0, 1.0, out=acc)
+                    return acc
+
+                # Same panel plan as the figure, at full resolution.
+                for n, (title, colors, _is_gray) in enumerate(plan, start=1):
+                    sfx = f"_{n:02d}_{_panel_slug(title)}"
+                    if colors is None:
+                        saved.append(write_panel(sfx, mrc_bc))
+                        continue
+                    comp = build_composite(colors)
+                    saved.append(write_panel(sfx, comp))
+                    del comp
+                del mrc_bc
                 self.status_var.set(f"Saved {len(saved)} overlay panel(s).")
                 messagebox.showinfo("Saved",
                     f"{len(saved)} file(s) in:\n{os.path.dirname(os.path.abspath(root))}\n\n"

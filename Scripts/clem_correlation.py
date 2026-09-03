@@ -163,6 +163,34 @@ class CLEMCorrelator:
                     order=1, preserve_range=True, mode="constant",
                     cval=0).astype(np.float32)
 
+    def warp_crop(self, tiff_stack, c, z, tform, x0, y0, cw,
+                  flip_x=False, flip_y=True, mrc_shape=None):
+        """Warp one (channel, z) raw slice straight into a cw x cw window whose
+        top-left corner is (x0, y0) in DISPLAY-MRC pixels.
+
+        Equivalent to warp_slice(...)[y0:y0+cw, x0:x0+cw] but it interpolates
+        cw**2 pixels instead of the whole montage. Writing FOV crops used to
+        warp the entire montage once per channel per z just to cut a few small
+        windows out of it, which is what made it slow.
+
+        Pass mrc_shape to zero everything outside the montage, matching what
+        cropping a full warped plane would have produced.
+        """
+        img = self._flip_slice(tiff_stack[c, z], flip_x, flip_y)
+        off = np.asarray([float(x0), float(y0)])
+        crop = warp(img, lambda coords: tform.inverse(coords + off),
+                    output_shape=(cw, cw), order=1, preserve_range=True,
+                    mode="constant", cval=0).astype(np.float32)
+
+        if mrc_shape is not None:
+            mrc_h, mrc_w = mrc_shape[-2:]
+            if x0 < 0 or y0 < 0 or x0 + cw > mrc_w or y0 + cw > mrc_h:
+                yy, xx = np.mgrid[0:cw, 0:cw]
+                inside = ((xx + x0 >= 0) & (xx + x0 < mrc_w) &
+                          (yy + y0 >= 0) & (yy + y0 < mrc_h))
+                crop = np.where(inside, crop, np.float32(0.0))
+        return crop
+
     # ------------------------------------------------------------------ #
     # High-level entry points
     # ------------------------------------------------------------------ #

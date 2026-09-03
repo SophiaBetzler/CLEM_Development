@@ -35,18 +35,65 @@ class TEMComm:
     # navigator handling and data storage
     # ---------------------------------------------------------------------------
 
-    def create_nav_file(self):
-        timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
+    def open_or_create_nav_file(self, nav_file=None, reuse=True):
+        """Open a navigator, reusing an existing file when there is one.
+
+        A restart must be able to find the maps a previous run registered
+        (site overviews, montages) via find_nav_item_with_note. That only works
+        if the SAME nav file is reopened -- creating a fresh one orphans every
+        prior item. Pass the path recorded in the session state as `nav_file`.
+
+        `nav_file` may be absolute or relative to output_root.
+        Returns the path actually opened, or None when offline.
+        """
+        if self.offline:
+            print("[INFO] Offline: skipping nav file creation.")
+            return None
+
+        if nav_file:
+            path = nav_file if os.path.isabs(nav_file) else os.path.join(self.output_root, nav_file)
+        else:
+            path = None
+
+        if reuse and path and os.path.isfile(path):
+            if sem.ReportIfNavOpen() > 0:
+                # Already open: only reopen if it is a DIFFERENT file, since
+                # closing and rereading loses nothing but costs time.
+                try:
+                    current = str(sem.ReportNavFile())
+                except Exception:
+                    current = ""
+                if current and os.path.normcase(os.path.abspath(current)) == \
+                        os.path.normcase(os.path.abspath(path)):
+                    print(f"[INFO] Navigator already open: {path}")
+                    return path
+                sem.CloseNavigator()
+            print(f"[INFO] Reopening existing nav file: {path}")
+            sem.ReadNavFile(path)
+            return path
+
+        if path and not os.path.isfile(path):
+            print(f"[WARN] Recorded nav file is missing, creating a new one: {path}")
 
         if sem.ReportIfNavOpen() > 0:
             sem.CloseNavigator()
-            
-        nav_file = os.path.join(self.output_root, "nav_file" + "_" + timestamp + '.nav')
-        sem.OpenNavigator(nav_file)
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H-%M-%S")
+        path = os.path.join(self.output_root, "nav_file" + "_" + timestamp + '.nav')
+        sem.OpenNavigator(path)
+        print(f"[INFO] Created nav file: {path}")
+        return path
+
+    def create_nav_file(self):
+        """Backwards-compatible wrapper: always makes a NEW nav file."""
+        return self.open_or_create_nav_file(nav_file=None, reuse=False)
 
     def add_nav_point_with_note(self, px, py, stage_z_um=None, buffer="S", note=None):
         if note is None:
             raise ValueError("Note cannot be None")
+        if self.offline:
+            print(f"[INFO] Offline: skipping nav point '{note}' at {px, py}.")
+            return 0        # 0, not None, so `if nav_idx > 0` guards stay valid
         if stage_z_um is not None:
             idx = int(sem.AddImagePosAsNavPoint(buffer, px, py, stage_z_um, 0, 1))
         else:
@@ -54,34 +101,64 @@ class TEMComm:
         sem.ChangeItemNote(idx, note)
         return idx
 
-    def add_nav_point(self, mrc_dataclass, buffer="S", stage_z_um=None):
+    def add_nav_point(self, mrc_dataclass, buffer="S", stage_z_um=None,
+                      site_label=None):
+        """Register every pick as a navigator point.
+
+        Notes are "<site_label>_pick_<n>" (or "pick_<n>" without a label), where
+        n is the pick number -- the same number the crop files are named after,
+        so a navigator item can be matched to its crop.
+        """
+        if self.offline:
+            print(f"[INFO] Offline: skipping {len(mrc_dataclass.picks)} nav point(s).")
+            return []
+
         self.set_montage_to_buffer(note=mrc_dataclass.montage_id, buffer=buffer)
         if stage_z_um is None:
             stage_z_um = mrc_dataclass.stage_z_um
         stage_z = float(stage_z_um) if stage_z_um is not None else -999.0
         indices = []
-        
+
         def _add(pick, group_id=0, note=None, suppress_redraw=1):
             idx = int(sem.AddImagePosAsNavPoint(buffer, pick.image_coord_x, pick.image_coord_y, stage_z, group_id, suppress_redraw))
             sem.ChangeItemNote(idx, note)
             indices.append(idx)
             return idx
-        
-        if mrc_dataclass.groups:
-            for group in mrc_dataclass.groups:
-                for pick in group.picks[:-1]:
-                    _add(pick, group_id=group.group_id, note=f"group_{group.group_id}_{pick.pick_id}", suppress_redraw=1)
-                _add(group.picks[-1], group_id=group.group_id, note=f"group_{group.group_id}_{pick.pick_id}", suppres_redraw=0)
-        else:
-            for pick in mrc_dataclass.picks[:-1]:
-                _add(pick, note=f"pick_{pick.pick_id}", suppress_redraw=1)
-            _add(pick[-1], note=f"pick_{pick.pick_id}", suppress_redraw=0)
+
+        n = len(mrc_dataclass.picks)
+        for i, pick in enumerate(mrc_dataclass.picks):
+            note = (f"{site_label}_pick_{pick.pick_id}" if site_label
+                    else f"pick_{pick.pick_id}")
+            _add(pick, note=note, suppress_redraw=0 if i == n - 1 else 1)
         
         return indices
 
+    def resolve_latest_mrc_dataclass(self, site_data):
+        """Newest MRCSummary for a site, preferring one already held in
+        site_data.mrcs and otherwise building it from the newest montage file
+        on disk.  The disk fallback is what lets a restarted run load a montage
+        acquired by an earlier process.  Returns None if nothing is found."""
+        if site_data is None:
+            return None
+
+        mrc_dataclass = self.mrc_reader._find_latest_mrc_dataclass(site_data)
+        if mrc_dataclass is not None:
+            return mrc_dataclass
+
+        try:
+            mrc_path = self.mrc_reader._find_latest_montage_mrc(site_data)
+        except (FileNotFoundError, NotADirectoryError, ValueError) as e:
+            print(f"[WARN] No montage found for "
+                  f"{getattr(site_data, 'site_id', site_data)}: {e}")
+            return None
+        return site_data.populate_mrc(self.mrc_reader, os.fspath(mrc_path))
+
     def load_mrc_in_nav(self, site_data=None, mrc_dataclass=None, buffer=None):
         if mrc_dataclass is None:
-            mrc_dataclass = self.mrc_reader.identify_latest_montage_file(site_data)
+            mrc_dataclass = self.resolve_latest_mrc_dataclass(site_data)
+        if mrc_dataclass is None:
+            print("[WARN] load_mrc_in_nav: no MRC to load.")
+            return None
 
         mrc_path = mrc_dataclass.mrc_path
         if mrc_path.lower().endswith(".mdoc"):
@@ -90,6 +167,7 @@ class TEMComm:
         if buffer is None:
             buffer = "A"
 
+        idx = None
         try:
             if sem.ReportIfNavOpen() == 0:
                 self.create_nav_file()               # was self._create_nav_file()
@@ -122,10 +200,16 @@ class TEMComm:
         return filename, timestamp
 
     def find_nav_item_with_note(self, note):
+        if self.offline:
+            print(f"[INFO] Offline: no navigator to search for note '{note}'.")
+            return None
         idx = int(sem.NavIndexWithNote(note))
         return idx if idx > 0 else None
-    
+
     def set_montage_to_buffer(self, note, buffer='S'):
+        if self.offline:
+            print(f"[INFO] Offline: skipping load of montage '{note}' into buffer {buffer}.")
+            return
         try:
             map_idx = int(sem.NavIndexWithNote(note))
         except Exception:
@@ -170,6 +254,9 @@ class TEMComm:
 
         
     def return_control_to_serialem(self, message):
+        if self.offline:
+            print(f"[INFO] Offline: would hand control to SerialEM -- {message}")
+            return
         try:
             sem.Exit(0)
         except Exception:
@@ -234,6 +321,12 @@ class TEMComm:
         sem.Eucentricity(eucentricity_settings[level])
 
     def report_stage_position(self):
+        if self.offline:
+            # Placeholder so an offline dry run can walk the whole workflow.
+            # Any site_data built from these values holds dummy coordinates --
+            # do not save an offline run over a real session's pickles.
+            print("[WARN] Offline: reporting stage position as (0, 0, 0, 0).")
+            return 0.0, 0.0, 0.0, 0.0
         stage_x, stage_y, stage_z = sem.ReportStageXYZ()
         stage_tilt = sem.ReportTiltAngle()
         return stage_x, stage_y, stage_z, stage_tilt
@@ -283,6 +376,7 @@ class TEMComm:
 
         if self.offline:
             print(f"[INFO] Stage move to {stage_x_um, stage_y_um, stage_z_um, stage_tilt}")
+            return          # offline: report the intent, touch no hardware
 
         backlashTilt = 2.0
         backlashXY = 2.0
@@ -310,6 +404,10 @@ class TEMComm:
     
     def precise_stage_move_relative(self, stage_x_um, stage_y_um, stage_z_um=None):
 
+        if self.offline:
+            print(f"[INFO] Relative stage move by {stage_x_um, stage_y_um, stage_z_um}")
+            return          # offline: report the intent, touch no hardware
+
         backlashXY = 2.0
 
         if stage_x_um is None or stage_y_um is None:
@@ -332,7 +430,10 @@ class TEMComm:
         sem.Delay(2, 'sec')
 
     def delete_nav_item(self, nav_idx):
-        if nav_idx > 0:
+        if self.offline:
+            print(f"[INFO] Offline: skipping delete of nav item {nav_idx}.")
+            return
+        if nav_idx is not None and nav_idx > 0:
             sem.SetSelectedNavItem(nav_idx)   
             sem.DeleteNavigatorItem(nav_idx)    
 
@@ -347,6 +448,7 @@ class TEMComm:
             sem.Delay(2, 'sec')
             if eucentricity is True and realign is False:
                 self.set_eucentricity(level='rough_fine')
+                print("[INFO] Running eucentricity, because realing is False.")
             if site_data is not None:
                 self.precise_stage_move(stage_tilt=site_data.milling_angle)
             if realign:
@@ -357,15 +459,25 @@ class TEMComm:
             else:
                 sem.MoveToNavItem(nav_idx)
                 sem.Delay(2, 'sec')
-        self.acquire_montage(site_data=site_data, mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, imaging_state=imaging_state, eucentricity=eucentricity, label=label)
+        return self.acquire_montage(site_data=site_data, mode=mode, fov_um_x=fov_um_x, fov_um_y=fov_um_y, imaging_state=imaging_state, eucentricity=False, label=label)
 
 
     def acquire_montage(self, site_data, fov_um_x, fov_um_y, mode='Search', imaging_state=None, eucentricity=False, label=None):
 
-        if self.offline and site_data is not None:
-            print(f"Montage collected for {site_data.site_id}.")
-        elif self.offline:
-            print(f"Acquiring Montage.")
+        if self.offline:
+            # Offline we cannot acquire, so we simulate "the montage is already
+            # there": attach the newest montage sitting in the site folder, if
+            # any. That is what makes an offline dry run of a restarted stage
+            # behave like the real thing. No sem.* call is made below.
+            if site_data is None:
+                print("[INFO] Offline: skipping montage acquisition (no site_data).")
+                return None
+            print(f"[INFO] Offline: skipping montage acquisition for {site_data.site_id}; "
+                  f"looking for an existing montage instead.")
+            mrc_dataclass = self.resolve_latest_mrc_dataclass(site_data)
+            if mrc_dataclass is not None:
+                print(f"[INFO] Offline: attached existing montage {mrc_dataclass.montage_id}.")
+            return mrc_dataclass
 
         self.prepare_imaging_state(mode=mode, imaging_state=imaging_state)
         
@@ -427,7 +539,8 @@ class TEMComm:
             sem.NewMap(0, montage_id)
             sem.CloseFile()
         if site_data is not None:
-            site_data.populate_mrc(self.mrc_reader.filepath)
+            return site_data.populate_mrc(self.mrc_reader, filepath)
+        return None
 
    ### HAVEN'T CLEANED UP BELOW YET - NEEDS TO BE REWRITTEN TO USE NEW ALIGNMENT FUNCTION
             

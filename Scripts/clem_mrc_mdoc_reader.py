@@ -188,7 +188,15 @@ class MRCReader:
                        if p.is_file()]
         if not matches:
             raise FileNotFoundError(f"No montage .mrc found in {folder}")
-        return max(matches, key=lambda p: p.stat().st_mtime)
+
+        def _recency(p):
+            # Prefer the timestamp in the filename; fall back to mtime for
+            # files that don't carry one. Tuple's first element keeps the two
+            # kinds from ever being compared against each other.
+            ts = self._timestamp_from_filename(p)
+            return (1, ts) if ts else (0, p.stat().st_mtime)
+
+        return max(matches, key=_recency)
 
     def _find_latest_ome_tiff(self, site_data):
         folder = self._site_folder(site_data)
@@ -203,17 +211,49 @@ class MRCReader:
         matches = [p for p in folder.glob("*.czi") if p.is_file()]
         return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
-    def _fit_latest_transfer(self, site_data):
-        folders = [Path(site_data.path).parent / "transforms", Path(site_data.path) / "transforms"]
-        patterns = ("transform_*.haml", "transform_*.yml", "transform_*.csv", "*.txt")
+    # Timestamp stamped into filenames by TEMComm: "..._20260819-14-31-02.mrc"
+    _TIMESTAMP_RE = re.compile(r"(\d{8}-\d{2}-\d{2}-\d{2})")
+
+    @classmethod
+    def _timestamp_from_filename(cls, path):
+        """Acquisition timestamp parsed out of a filename, or None.
+
+        Preferred over st_mtime for ordering, because mtime is rewritten when
+        files are copied between machines or re-synced by cloud storage.
+        """
+        if path is None:
+            return None
+        match = cls._TIMESTAMP_RE.search(os.path.basename(os.fspath(path)))
+        return match.group(1) if match else None
+
+    def _find_latest_transform(self, site_data):
+        """Newest saved transform file for a site, or None if there is none.
+
+        Accepts a SiteDataSummary, a Path or a plain folder string (via
+        _site_folder), so a restart can ask for a site's transform without
+        first rebuilding the dataclass.  Looks in <site>/transforms (where
+        RegistrationApp saves) and <site>/../transforms (the correlator's
+        default when an output_root is set).  Returns a Path; the caller
+        parses it with CLEMCorrelator.load_transform().
+        """
+        try:
+            site_folder = self._site_folder(site_data)
+        except (ValueError, NotADirectoryError):
+            return None
+
+        folders = [site_folder / "transforms", site_folder.parent / "transforms"]
+        # save_transform() writes .yaml when PyYAML is importable and .csv
+        # otherwise; .yml and .txt are accepted for hand-written/legacy files.
+        patterns = ("transform_*.yaml", "transform_*.yml",
+                    "transform_*.csv", "*.txt")
         matches = []
         for folder in folders:
             if folder.is_dir():
                 for pat in patterns:
                     matches += [p for p in folder.glob(pat) if p.is_file()]
         if not matches:
-            raise FileNotFoundError(f"No transform found.")
-        return max(matches, key=lambda p:p.stat().st_mtime)
+            return None
+        return max(matches, key=lambda p: p.stat().st_mtime)
 
     def _find_mdoc_path(self, mrc_filepath):
         directory = os.path.dirname(mrc_filepath)
@@ -286,8 +326,15 @@ class MRCReader:
     def load_mrc_single(self, mrc_filepath=None):
         if mrc_filepath is None:
             raise ValueError("No MRC file path provided.")
-        with mrcfile.open(mrc_filepath, mode="r", permissive=True) as mrc:
-            data = mrc.data.copy()
+        # mmap for the same reason as in _assemble_montage: a single huge
+        # readinto() fails on Windows network shares. numpy copies a memmap in
+        # page-sized reads, so the data still ends up in memory but safely.
+        try:
+            _mrc_ctx = mrcfile.mmap(mrc_filepath, mode="r", permissive=True)
+        except Exception:
+            _mrc_ctx = mrcfile.open(mrc_filepath, mode="r", permissive=True)
+        with _mrc_ctx as mrc:
+            data = np.asarray(mrc.data).copy()
             voxel = mrc.voxel_size
             info = f"shape={data.shape}  voxel={voxel}"
         if data.ndim == 3:
@@ -564,7 +611,8 @@ class MRCReader:
         return written
 
     def write_multichannel_crops(self, mrc_dataclass, warp_slice, n_channels, n_z,
-                                fov_um, output_root, pixel_spacing_um, prefix=""):
+                                fov_um, output_root, pixel_spacing_um, prefix="",
+                                warp_crop=None):
         cw = self._fov_in_px(pixel_spacing_um, fov_um)
         picks = mrc_dataclass.picks
         stacks = [np.zeros((n_z, 1 + n_channels, cw, cw), np.float32) for _ in picks]
@@ -578,12 +626,35 @@ class MRCReader:
             crop = self._crop_centered_at_pixel_coord(mrc_dataclass.image, px, py, pixel_spacing_um, fov_um)
             for z in range(n_z):
                 stacks[pi][z, 0] = crop
-        for c in range(n_channels):                       # channels = warped FL
-            for z in range(n_z):
-                full = warp_slice(c, z)
-                for pi, pick in enumerate(picks):
-                    px, py = to_true(pick.image_coord_x, pick.image_coord_y)
-                    stacks[pi][z, c + 1] = self._crop_centered_at_pixel_coord(full, px, py, pixel_spacing_um, fov_um)
+
+        # Warping the whole montage for every (channel, z) and then cutting
+        # small windows out of it is the expensive way round. When the crops
+        # cover less area than the montage, warp straight into each crop
+        # instead -- the same pixels, far fewer of them.
+        H, W = mrc_dataclass.image.shape[:2]
+        use_crop_warp = (warp_crop is not None
+                         and len(picks) * cw * cw < H * W)
+
+        if use_crop_warp:
+            half = cw // 2
+            for pi, pick in enumerate(picks):
+                px, py = to_true(pick.image_coord_x, pick.image_coord_y)
+                # Same origin convention as _crop_centered_at_pixel_coord,
+                # including the coercion (pick coords may arrive as strings).
+                px = self._coerce_scalar(px, "px")
+                py = self._coerce_scalar(py, "py")
+                x0, y0 = int(round(px)) - half, int(round(py)) - half
+                for c in range(n_channels):
+                    for z in range(n_z):
+                        stacks[pi][z, c + 1] = warp_crop(c, z, x0, y0, cw)
+        else:
+            for c in range(n_channels):                   # channels = warped FL
+                for z in range(n_z):
+                    full = warp_slice(c, z)
+                    for pi, pick in enumerate(picks):
+                        px, py = to_true(pick.image_coord_x, pick.image_coord_y)
+                        stacks[pi][z, c + 1] = self._crop_centered_at_pixel_coord(full, px, py, pixel_spacing_um, fov_um)
+                    del full
         res = (1.0 / pixel_spacing_um) if pixel_spacing_um > 0 else 1.0
         labels = (["TEM"] + [f"Ch{c}" for c in range(n_channels)]) * n_z
         os.makedirs(os.path.dirname(output_root) or ".", exist_ok=True)
@@ -597,15 +668,39 @@ class MRCReader:
         return written
 
 
-    def write_fov_crops(self, site_data, warp_slice, n_channels, n_z,
-                        fov_um, output_root):
+    def write_fov_crops(self, mrc_dataclass, warp_slice, n_channels, n_z,
+                        fov_um, picks_dir, pixel_spacing_um=None, warp_crop=None):
+        """Write an FOV crop per pick into `picks_dir`: one MRC crop and one
+        multichannel TIFF overlay each.
+
+        Takes an MRCSummary (which is what carries .picks, .image and the flip
+        flags), and names files the same way the paceTomo export does, so both
+        land side by side in <site>/picks:
+
+            picks/crop_fov_<pick_id>.mrc
+            picks/target_overlays_<pick_id>.tif
+
+        Returns {"tif": [...], "mrc": [...]} of the paths written.
+        """
+        if pixel_spacing_um is None:
+            pixel_spacing_um = mrc_dataclass.pixel_spacing_um
+        os.makedirs(picks_dir, exist_ok=True)
+
         tif = self.write_multichannel_crops(
-            site_data, warp_slice, n_channels, n_z, fov_um, output_root)
-        mrc_paths = self.write_mrc_crops(site_data, fov_um, output_root)
-        for i, pick in enumerate(site_data.picks):
-            if i < len(mrc_paths) and mrc_paths[i] is not None:
-                pick.view_crop_path = mrc_paths[i]
-        return {"tif": tif, "mrc": mrc_paths}
+            mrc_dataclass=mrc_dataclass, warp_slice=warp_slice,
+            n_channels=n_channels, n_z=n_z, fov_um=fov_um,
+            output_root=os.path.join(picks_dir, "target_overlays"),
+            pixel_spacing_um=pixel_spacing_um, warp_crop=warp_crop)
+
+        mrc_paths = self.write_mrc_crops(
+            mrc_dataclass=mrc_dataclass, fov_um=fov_um,
+            pixel_spacing_um=pixel_spacing_um,
+            output_root=os.path.join(picks_dir, "crop"), label="fov")
+
+        for pick, path in zip(mrc_dataclass.picks, mrc_paths):
+            if path is not None:
+                pick.view_crop_path = path
+        return {"tif": tif, "mrc": [p for p in mrc_paths if p is not None]}
     # ------------------------------------------------------------------ #
     # Montage assembly
     # ------------------------------------------------------------------ #
@@ -629,25 +724,39 @@ class MRCReader:
 
         z_indices = [p["ZValue"] for p in pieces]
 
-        with mrcfile.open(mdoc_filepath, mode="r", permissive=True) as mrc:
+        # Memory-map rather than read the whole stack. mrcfile.open() pulls the
+        # entire data block in ONE readinto(), which fails with
+        # "OSError: [Errno 22] Invalid argument" for a large montage on a
+        # Windows network share (Z:\...), and otherwise holds every tile in
+        # memory at once as float64. mmap fetches each tile on demand, so peak
+        # memory is one tile and no single read is oversized.
+        try:
+            _mrc_ctx = mrcfile.mmap(mdoc_filepath, mode="r", permissive=True)
+        except Exception as exc:                 # e.g. gzipped MRC: mmap can't
+            print(f"[INFO] mmap unavailable for {os.path.basename(str(mdoc_filepath))} "
+                  f"({exc}); falling back to a full read.")
+            _mrc_ctx = mrcfile.open(mdoc_filepath, mode="r", permissive=True)
+
+        with _mrc_ctx as mrc:
             data = mrc.data
             if data is None:
                 raise ValueError("MRC contains no image data.")
             if data.ndim == 2:
-                return self._normalize_image(data.astype(np.float32)), 0.0, 0.0
+                return self._normalize_image(np.asarray(data, dtype=np.float32)), 0.0, 0.0
             if data.ndim != 3:
                 raise ValueError(f"Unsupported MRC shape {data.shape}")
             n_frames = data.shape[0]
-            pieces_edited = {z: data[z].astype(np.float64)
-                     for z in z_indices if z < n_frames}
 
-        for piece, x, y in coords:
-            z = piece["ZValue"]
-            if z not in pieces_edited:
-                continue
-            dx = int(round(x - min_x)); dy = int(round(y - min_y))
-            canvas[dy:dy + img_h, dx:dx + img_w] += pieces_edited[z] * wmap
-            weights[dy:dy + img_h, dx:dx + img_w] += wmap
+            # One tile at a time, blended straight into the canvas.
+            for piece, x, y in coords:
+                z = piece["ZValue"]
+                if z >= n_frames:
+                    continue
+                tile = np.asarray(data[z], dtype=np.float64)
+                dx = int(round(x - min_x)); dy = int(round(y - min_y))
+                canvas[dy:dy + img_h, dx:dx + img_w] += tile * wmap
+                weights[dy:dy + img_h, dx:dx + img_w] += wmap
+                del tile
 
         valid = weights > 0
         canvas[valid] /= weights[valid]
@@ -726,6 +835,7 @@ class MRCReader:
         return MRCSummary(
             mrc_path=os.fspath(mrc_filepath),
             montage_id=montage_id,
+            timestamp=self._timestamp_from_filename(mrc_filepath),
             metadata = metadata,
             image=img, image_height=img_h, image_width=img_w,
             pixel_spacing_um=pixel_spacing_um,

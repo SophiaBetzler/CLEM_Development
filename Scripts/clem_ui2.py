@@ -1129,13 +1129,20 @@ class RegistrationApp(tk.Tk):
         if mrc_dc is not None and getattr(mrc_dc, "mrc_path", None):
             self.tem.load_mrc_in_nav(mrc_dataclass=mrc_dc, buffer='S')
         # Startup auto re-apply if a stored transform exists for this site.
+        # Opt-in: set self.reuse_transform = True before _load_site_data runs.
+        # (Kept in step with clem_ui.RegistrationApp; see RESTART_PLAN.md 2.2.)
         record = None
-        finder = getattr(self.mrc_reader, "_find_latest_transform", None)
-        if callable(finder):
-            try:
-                record = finder(self.site_id)
-            except Exception:
-                record = None
+        if getattr(self, "reuse_transform", False):
+            finder = getattr(self.mrc_reader, "_find_latest_transform", None)
+            if callable(finder):
+                try:
+                    # The finder returns a path; the correlator parses it.
+                    path = finder(self.site_data)
+                    if path is not None:
+                        record = self.correlator.load_transform(os.fspath(path))
+                except Exception:
+                    import traceback; traceback.print_exc()
+                    record = None
         if record is not None and self.tiff_stack is not None:
             self._loaded_record = record
             self.flip_x.set(bool(record.flip_x))

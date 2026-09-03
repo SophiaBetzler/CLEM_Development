@@ -61,27 +61,12 @@ class Pick:
     record_img_path: Optional[str] = None
     view_crop_path: Optional[str] = None
 
-    image_shift_x: Optional[float] = None
-    image_shift_y: Optional[float] = None
-
-    is_tracking_target: bool = False
-
     def get_stage_position(self) -> tuple:
         return (self.stage_x_um, self.stage_y_um, self.stage_z_um)
-        
-    def get_image_shift(self) -> tuple[float, float]:
-        return (float(self.image_shift_x or 0.0), float(self.image_shift_y or 0.0),)
 
     def get_image_position(self) -> tuple[float, float]:
         return (float(self.image_coord_x), float(self.image_coord_y))
 
-
-@dataclass
-class TargetGroup:
-    group_id: str
-    tracking: Pick
-    picks: list = field(default_factory=list)   # list[Pick]
- 
 
 # --------------------------------------------------------------------------- #
 # Sections
@@ -104,6 +89,10 @@ class ImageSummary:
 class MRCSummary:
     mrc_path: Optional[str] = None
     montage_id: Optional[str] = None
+    # Acquisition time as "YYYYmmdd-HH-MM-SS", parsed from the filename that
+    # TEMComm.acquire_montage wrote. Used to order montages when a site has
+    # more than one; survives file copies and cloud sync, unlike mtime.
+    timestamp: Optional[str] = None
     stage_z_um: Optional[float] = None
     image: Optional[Any] = None                 # np.ndarray (assembled montage)
     image_height: Optional[int] = None
@@ -123,7 +112,6 @@ class MRCSummary:
     flip_y: Optional[bool] = None
     stage_tilt_deg: Optional[float] = None
     picks: list[Pick] = field(default_factory=list)
-    groups: list[TargetGroup] = field(default_factory=list) 
 
     def add_pick(self, pick_id, pixel_x_um=None, pixel_y_um=None,
                      stage_x_um=None, stage_y_um=None, stage_z_um=None, notes=None):
