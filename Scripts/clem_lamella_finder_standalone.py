@@ -274,6 +274,12 @@ def extract_yaml_lamellae(yaml_path):
 
     out = []
     for pos in data.get("positions", []):
+        # Match clem_arctis_tool: missing state is NONE; every other state is excluded.
+        defect = pos.get("defect") or {}
+        defect_state = str(defect.get("state") or "NONE").upper()
+        if defect_state != "NONE":
+            continue
+
         poi = pos.get("poi") or {}
         sp = (((pos.get("poses") or {}).get("MILLING") or {})
               .get("stage_position") or {})

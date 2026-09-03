@@ -577,8 +577,7 @@ class ExecutiveControls:
                 self.tem.move_stage_to_nav_item(nav_idx=idx)
                 self.tem.acquire_montage_at_nav_item(site_data=site_data, mode='View', nav_idx=idx, fov_um_x=self.montage_settings[self.sample_type]['fov_um_x_high_mag'], fov_um_y=self.montage_settings[self.sample_type]['fov_um_y_high_mag'], eucentricity=True, realign=True)
                 self.tem.delete_nav_item(nav_idx=idx)
-                ui = RegistrationApp(mrc_reader=self.mrc_reader, site_data=site_data,
-                                     tem_communication=self.tem)
+                ui = RegistrationApp(mrc_reader=self.mrc_reader, site_data=site_data, tem_communication=self.tem)
                 ui.mainloop()
                 try:
                     ui.destroy()
